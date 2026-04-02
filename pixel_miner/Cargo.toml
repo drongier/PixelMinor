@@ -1,0 +1,15 @@
+[package]
+name = "pixel_miner"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bevy = "0.15"
+rand = "0.8"
+
+# Optimisations en mode debug pour éviter les lags
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
