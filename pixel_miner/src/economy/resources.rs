@@ -8,9 +8,15 @@ pub struct Inventory {
     pub items: HashMap<TileType, u32>,
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct Wallet {
     pub money: u64,
+}
+
+impl Default for Wallet {
+    fn default() -> Self {
+        Self { money: 500 }
+    }
 }
 
 #[derive(Resource, Default)]

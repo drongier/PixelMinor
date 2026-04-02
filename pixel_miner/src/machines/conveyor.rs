@@ -18,8 +18,8 @@ impl Plugin for ConveyorPlugin {
                 finalize_merge,
                 conveyor_pull,
                 conveyor_transport,
-                transfer_between_belts,
-                conveyor_deliver,
+                transfer_between_belts.after(conveyor_transport),
+                conveyor_deliver.after(transfer_between_belts),
                 collect_conveyor_end,
                 update_conveyor_visuals,
             ));
@@ -334,40 +334,49 @@ fn finalize_merge(
 fn transfer_between_belts(
     mut belts: ResMut<ConveyorBelts>,
 ) {
-    // Collecter les transferts à faire
-    let mut transfers: Vec<(u32, usize, TileType)> = Vec::new();
+    // Collecter les transferts à faire : (source_belt_id, target_belt_id, target_index, tile_type)
+    let mut transfers: Vec<(u32, u32, usize, TileType)> = Vec::new();
 
     for belt in belts.belts.iter() {
         if let Some((target_belt_id, target_index)) = belt.feeds_into {
             if !belt.end_storage.is_empty() {
-                // Prendre le premier item du end_storage
                 if let Some((tile_type, _)) = belt.end_storage.iter().find(|(_, qty)| **qty > 0) {
-                    transfers.push((target_belt_id, target_index, tile_type.clone()));
+                    transfers.push((belt.id, target_belt_id, target_index, tile_type.clone()));
                 }
             }
         }
     }
 
-    // Appliquer les transferts
-    for (target_belt_id, target_index, tile_type) in transfers {
-        // Retirer du source
-        let source = belts.belts.iter_mut().find(|b| {
-            b.feeds_into == Some((target_belt_id, target_index))
-        });
-        if let Some(source) = source {
-            if let Some(qty) = source.end_storage.get_mut(&tile_type) {
-                *qty -= 1;
-                if *qty == 0 {
-                    source.end_storage.remove(&tile_type);
+    for (source_id, target_belt_id, target_index, tile_type) in transfers {
+        // Trouver un slot libre sur le tapis cible (au point de jonction ou après)
+        let injected = {
+            let target = belts.belts.iter_mut().find(|b| b.id == target_belt_id);
+            if let Some(target) = target {
+                let mut slot_found = false;
+                // Essayer le slot de jonction d'abord, puis les slots suivants
+                for i in target_index..target.slots.len() {
+                    if target.slots[i].is_none() {
+                        target.slots[i] = Some(tile_type.clone());
+                        slot_found = true;
+                        break;
+                    }
                 }
+                slot_found
+            } else {
+                false
             }
-        }
+        };
 
-        // Injecter dans le target
-        let target = belts.belts.iter_mut().find(|b| b.id == target_belt_id);
-        if let Some(target) = target {
-            if target_index < target.slots.len() && target.slots[target_index].is_none() {
-                target.slots[target_index] = Some(tile_type);
+        // Retirer du source seulement si l'injection a réussi
+        if injected {
+            let source = belts.belts.iter_mut().find(|b| b.id == source_id);
+            if let Some(source) = source {
+                if let Some(qty) = source.end_storage.get_mut(&tile_type) {
+                    *qty -= 1;
+                    if *qty == 0 {
+                        source.end_storage.remove(&tile_type);
+                    }
+                }
             }
         }
     }
