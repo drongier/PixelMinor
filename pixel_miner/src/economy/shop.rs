@@ -2,7 +2,10 @@ use bevy::prelude::*;
 
 use crate::machines::auto_miner::MinerInventory;
 use crate::player::player::Player;
-use crate::economy::resources::{PlayerStats, ShopOpen, Wallet};
+use crate::economy::resources::{
+    bag_capacity, pickaxe_power, walk_speed, PlayerStats, ShopOpen, UpgradeTier, Wallet,
+    BAG_TIERS, BASE_WALK_SPEED, PICKAXE_TIERS, SPEED_TIERS,
+};
 use crate::machines::scout_bot::BotInventory;
 use crate::world::tiles::{SHOP_ZONE_POS, TILE_SIZE};
 
@@ -19,56 +22,19 @@ impl Plugin for ShopPlugin {
 }
 
 // --- Upgrade definitions ---
-
-struct UpgradeTier {
-    name: &'static str,
-    value: f32,
-    cost: u64,
-}
-
-const PICKAXE_TIERS: &[UpgradeTier] = &[
-    UpgradeTier { name: "Pioche en bois",   value: 1.0,  cost: 0 },
-    UpgradeTier { name: "Pioche en pierre",  value: 2.0,  cost: 50 },
-    UpgradeTier { name: "Pioche en fer",     value: 4.0,  cost: 200 },
-    UpgradeTier { name: "Pioche en or",      value: 7.0,  cost: 1000 },
-    UpgradeTier { name: "Pioche diamant",    value: 12.0, cost: 5000 },
-];
-
-const BAG_TIERS: &[UpgradeTier] = &[
-    UpgradeTier { name: "Poches",    value: 10.0,  cost: 0 },
-    UpgradeTier { name: "Petit sac", value: 20.0,  cost: 100 },
-    UpgradeTier { name: "Sac a dos", value: 40.0,  cost: 500 },
-    UpgradeTier { name: "Chariot",   value: 80.0,  cost: 2000 },
-    UpgradeTier { name: "Wagon",     value: 150.0, cost: 10000 },
-];
-
-const SPEED_TIERS: &[UpgradeTier] = &[
-    UpgradeTier { name: "Normal",      value: 1.0, cost: 0 },
-    UpgradeTier { name: "Rapide",      value: 1.5, cost: 300 },
-    UpgradeTier { name: "Tres rapide", value: 2.0, cost: 1500 },
-    UpgradeTier { name: "Frenetique",  value: 3.0, cost: 8000 },
-];
+// Les paliers (PICKAXE_TIERS, BAG_TIERS, SPEED_TIERS) vivent dans resources.rs
+// pour que PlayerStats::default() en dérive directement.
 
 const AUTO_MINER_COST: u64 = 100;
 const SCOUT_BOT_COST: u64 = 50;
 
 // --- State ---
 
-#[derive(Resource)]
+#[derive(Resource, Default)]
 struct ShopState {
     pickaxe_tier: usize,
     bag_tier: usize,
     speed_tier: usize,
-}
-
-impl Default for ShopState {
-    fn default() -> Self {
-        Self {
-            pickaxe_tier: 0,
-            bag_tier: 0,
-            speed_tier: 0,
-        }
-    }
 }
 
 // --- Components ---
@@ -144,6 +110,18 @@ fn close_shop(
     }
 }
 
+/// Tente d'acheter le palier suivant d'une table. Retourne le nouveau palier si achat.
+fn try_upgrade(tiers: &[UpgradeTier], current: usize, wallet: &mut Wallet) -> Option<usize> {
+    let next = current + 1;
+    let tier = tiers.get(next)?;
+    if wallet.money < tier.cost {
+        return None;
+    }
+    wallet.money -= tier.cost;
+    Some(next)
+}
+
+#[allow(clippy::too_many_arguments)] // système Bevy : une ressource par paramètre
 fn shop_buy(
     keys: Res<ButtonInput<KeyCode>>,
     shop_open: Res<ShopOpen>,
@@ -162,114 +140,118 @@ fn shop_buy(
 
     // [1] Pioche
     if keys.just_pressed(KeyCode::Digit1) {
-        let next = shop_state.pickaxe_tier + 1;
-        if next < PICKAXE_TIERS.len() && wallet.money >= PICKAXE_TIERS[next].cost {
-            wallet.money -= PICKAXE_TIERS[next].cost;
-            shop_state.pickaxe_tier = next;
-            stats.mining_power = PICKAXE_TIERS[next].value;
+        if let Some(t) = try_upgrade(PICKAXE_TIERS, shop_state.pickaxe_tier, &mut wallet) {
+            shop_state.pickaxe_tier = t;
+            stats.mining_power = pickaxe_power(t);
             bought = true;
         }
     }
 
     // [2] Sac
     if keys.just_pressed(KeyCode::Digit2) {
-        let next = shop_state.bag_tier + 1;
-        if next < BAG_TIERS.len() && wallet.money >= BAG_TIERS[next].cost {
-            wallet.money -= BAG_TIERS[next].cost;
-            shop_state.bag_tier = next;
-            stats.inventory_capacity = BAG_TIERS[next].value as u32;
+        if let Some(t) = try_upgrade(BAG_TIERS, shop_state.bag_tier, &mut wallet) {
+            shop_state.bag_tier = t;
+            stats.inventory_capacity = bag_capacity(t);
             bought = true;
         }
     }
 
     // [3] Vitesse
     if keys.just_pressed(KeyCode::Digit3) {
-        let next = shop_state.speed_tier + 1;
-        if next < SPEED_TIERS.len() && wallet.money >= SPEED_TIERS[next].cost {
-            wallet.money -= SPEED_TIERS[next].cost;
-            shop_state.speed_tier = next;
-            stats.walk_speed = 150.0 * SPEED_TIERS[next].value;
+        if let Some(t) = try_upgrade(SPEED_TIERS, shop_state.speed_tier, &mut wallet) {
+            shop_state.speed_tier = t;
+            stats.walk_speed = walk_speed(t);
             bought = true;
         }
     }
 
     // [4] Auto-mineur
-    if keys.just_pressed(KeyCode::Digit4) {
-        if wallet.money >= AUTO_MINER_COST {
-            wallet.money -= AUTO_MINER_COST;
-            miner_inv.count += 1;
-            bought = true;
-        }
+    if keys.just_pressed(KeyCode::Digit4) && wallet.money >= AUTO_MINER_COST {
+        wallet.money -= AUTO_MINER_COST;
+        miner_inv.count += 1;
+        bought = true;
     }
 
     // [5] Bot éclaireur
-    if keys.just_pressed(KeyCode::Digit5) {
-        if wallet.money >= SCOUT_BOT_COST {
-            wallet.money -= SCOUT_BOT_COST;
-            bot_inv.count += 1;
-            bought = true;
-        }
+    if keys.just_pressed(KeyCode::Digit5) && wallet.money >= SCOUT_BOT_COST {
+        wallet.money -= SCOUT_BOT_COST;
+        bot_inv.count += 1;
+        bought = true;
     }
 
-    // Toujours rafraîchir le texte quand le shop est ouvert
+    // Rafraîchir le texte à l'ouverture (texte vide), après un achat,
+    // ou si l'argent / les stocks ont changé ailleurs.
     if let Ok(mut text) = text_query.get_single_mut() {
-        *text = Text::new(build_shop_text(&shop_state, &wallet, &miner_inv, &bot_inv));
+        let needs_refresh = bought
+            || text.0.is_empty()
+            || wallet.is_changed()
+            || miner_inv.is_changed()
+            || bot_inv.is_changed();
+        if needs_refresh {
+            *text = Text::new(build_shop_text(&shop_state, &wallet, &miner_inv, &bot_inv));
+        }
     }
+}
+
+fn affordable_suffix(wallet: &Wallet, cost: u64) -> &'static str {
+    if wallet.money >= cost { "" } else { " (pas assez)" }
+}
+
+/// Écrit la ligne "Actuel" + la ligne d'achat (ou MAX) pour une table de paliers.
+fn push_tier_section(
+    lines: &mut String,
+    key: u8,
+    tiers: &[UpgradeTier],
+    current: usize,
+    wallet: &Wallet,
+    describe: impl Fn(&UpgradeTier) -> String,
+) {
+    let cur = &tiers[current];
+    lines.push_str(&format!("  Actuel: {} ({})\n", cur.name, describe(cur)));
+    match tiers.get(current + 1) {
+        Some(next) => lines.push_str(&format!(
+            "[{}] {} — {} — {} c{}\n",
+            key,
+            next.name,
+            describe(next),
+            next.cost,
+            affordable_suffix(wallet, next.cost)
+        )),
+        None => lines.push_str(&format!("[{}] MAX\n", key)),
+    }
+    lines.push('\n');
 }
 
 fn build_shop_text(state: &ShopState, wallet: &Wallet, miner_inv: &MinerInventory, bot_inv: &BotInventory) -> String {
     let mut lines = String::from("--- SHOP ---\n[E/Echap] Fermer\n\n");
 
-    // Pioche
-    let current_pick = &PICKAXE_TIERS[state.pickaxe_tier];
-    lines.push_str(&format!("  Actuel: {} (puissance {})\n", current_pick.name, current_pick.value));
-    if state.pickaxe_tier + 1 < PICKAXE_TIERS.len() {
-        let next = &PICKAXE_TIERS[state.pickaxe_tier + 1];
-        let affordable = if wallet.money >= next.cost { "" } else { " (pas assez)" };
-        lines.push_str(&format!("[1] {} — puissance {} — {} c{}\n", next.name, next.value, next.cost, affordable));
-    } else {
-        lines.push_str("[1] MAX\n");
-    }
-
-    lines.push('\n');
-
-    // Sac
-    let current_bag = &BAG_TIERS[state.bag_tier];
-    lines.push_str(&format!("  Actuel: {} (capacite {})\n", current_bag.name, current_bag.value as u32));
-    if state.bag_tier + 1 < BAG_TIERS.len() {
-        let next = &BAG_TIERS[state.bag_tier + 1];
-        let affordable = if wallet.money >= next.cost { "" } else { " (pas assez)" };
-        lines.push_str(&format!("[2] {} — capacite {} — {} c{}\n", next.name, next.value as u32, next.cost, affordable));
-    } else {
-        lines.push_str("[2] MAX\n");
-    }
-
-    lines.push('\n');
-
-    // Vitesse
-    let current_speed = &SPEED_TIERS[state.speed_tier];
-    lines.push_str(&format!("  Actuel: {} (x{})\n", current_speed.name, current_speed.value));
-    if state.speed_tier + 1 < SPEED_TIERS.len() {
-        let next = &SPEED_TIERS[state.speed_tier + 1];
-        let affordable = if wallet.money >= next.cost { "" } else { " (pas assez)" };
-        lines.push_str(&format!("[3] {} — x{} — {} c{}\n", next.name, next.value, next.cost, affordable));
-    } else {
-        lines.push_str("[3] MAX\n");
-    }
-
-    lines.push('\n');
+    push_tier_section(&mut lines, 1, PICKAXE_TIERS, state.pickaxe_tier, wallet, |t| {
+        format!("puissance {}", t.value)
+    });
+    push_tier_section(&mut lines, 2, BAG_TIERS, state.bag_tier, wallet, |t| {
+        format!("capacite {}", t.value as u32)
+    });
+    push_tier_section(&mut lines, 3, SPEED_TIERS, state.speed_tier, wallet, |t| {
+        format!("x{} = {:.0}", t.value, BASE_WALK_SPEED * t.value)
+    });
 
     // Auto-mineur
     lines.push_str(&format!("  Mineurs en stock: {}\n", miner_inv.count));
-    let affordable = if wallet.money >= AUTO_MINER_COST { "" } else { " (pas assez)" };
-    lines.push_str(&format!("[4] Auto-mineur — {} c{}\n", AUTO_MINER_COST, affordable));
+    lines.push_str(&format!(
+        "[4] Auto-mineur — {} c{}\n",
+        AUTO_MINER_COST,
+        affordable_suffix(wallet, AUTO_MINER_COST)
+    ));
 
     lines.push('\n');
 
     // Bot éclaireur
     lines.push_str(&format!("  Bots en stock: {}\n", bot_inv.count));
-    let affordable = if wallet.money >= SCOUT_BOT_COST { "" } else { " (pas assez)" };
-    lines.push_str(&format!("[5] Bot eclaireur — {} c{}\n", SCOUT_BOT_COST, affordable));
+    lines.push_str(&format!(
+        "[5] Bot eclaireur — {} c{}\n",
+        SCOUT_BOT_COST,
+        affordable_suffix(wallet, SCOUT_BOT_COST)
+    ));
 
     lines
 }
@@ -300,4 +282,51 @@ fn spawn_shop_modal(commands: &mut Commands) {
                 TextColor(Color::WHITE),
             ));
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text_for(state: &ShopState, money: u64) -> String {
+        build_shop_text(
+            state,
+            &Wallet { money },
+            &MinerInventory::default(),
+            &BotInventory::default(),
+        )
+    }
+
+    #[test]
+    fn shop_shows_max_at_max_tier() {
+        let state = ShopState {
+            pickaxe_tier: PICKAXE_TIERS.len() - 1,
+            bag_tier: BAG_TIERS.len() - 1,
+            speed_tier: SPEED_TIERS.len() - 1,
+        };
+        let text = text_for(&state, 0);
+        assert!(text.contains("[1] MAX"));
+        assert!(text.contains("[2] MAX"));
+        assert!(text.contains("[3] MAX"));
+    }
+
+    #[test]
+    fn shop_shows_next_tier_at_start() {
+        let text = text_for(&ShopState::default(), 0);
+        assert!(!text.contains("MAX"));
+        assert!(text.contains(PICKAXE_TIERS[0].name));
+        assert!(text.contains(PICKAXE_TIERS[1].name));
+        assert!(text.contains("(pas assez)"));
+    }
+
+    #[test]
+    fn try_upgrade_respects_money_and_max() {
+        let mut wallet = Wallet { money: PICKAXE_TIERS[1].cost };
+        assert_eq!(try_upgrade(PICKAXE_TIERS, 0, &mut wallet), Some(1));
+        assert_eq!(wallet.money, 0);
+        assert_eq!(try_upgrade(PICKAXE_TIERS, 1, &mut wallet), None);
+        let mut rich = Wallet { money: u64::MAX };
+        assert_eq!(try_upgrade(PICKAXE_TIERS, PICKAXE_TIERS.len() - 1, &mut rich), None);
+        assert_eq!(rich.money, u64::MAX);
+    }
 }

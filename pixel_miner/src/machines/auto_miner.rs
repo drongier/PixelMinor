@@ -29,7 +29,7 @@ pub struct AutoMiner {
 }
 
 const MINER_PROXIMITY: f32 = TILE_SIZE * 2.5;
-const MAX_MINER_STORAGE: u32 = 50;
+pub const MAX_MINER_STORAGE: u32 = 50;
 const PRODUCTION_INTERVAL: f32 = 10.0;
 
 fn handle_b_key(

@@ -26,7 +26,7 @@ impl Plugin for ConveyorPlugin {
     }
 }
 
-const CONVEYOR_COST: u64 = 10;
+pub const CONVEYOR_COST: u64 = 10;
 const TRANSPORT_INTERVAL: f32 = 5.0;
 const CONVEYOR_COLOR: Color = Color::srgb(0.45, 0.45, 0.50);
 const CONVEYOR_PREVIEW_COLOR: Color = Color::srgba(0.45, 0.45, 0.50, 0.5);
