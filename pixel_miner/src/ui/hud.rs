@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
-use crate::machines::auto_miner::{AutoMiner, MinerInventory};
-use crate::machines::conveyor::ConveyorState;
+use crate::machines::auto_miner::{AutoMiner, MinerInventory, MAX_MINER_STORAGE};
+use crate::machines::conveyor::{ConveyorState, CONVEYOR_COST};
 use crate::world::deposits::Deposit;
 use crate::player::player::Player;
 use crate::economy::resources::{Inventory, PlayerStats, Wallet};
@@ -25,6 +25,20 @@ struct HudMoneyText;
 
 #[derive(Component)]
 struct HudStatsText;
+
+const INVENTORY_COLOR: Color = Color::WHITE;
+const INVENTORY_FULL_COLOR: Color = Color::srgb(1.0, 0.25, 0.25);
+
+type InventoryTextQuery<'w, 's> = Query<
+    'w,
+    's,
+    (&'static mut Text, &'static mut TextColor),
+    (With<HudInventoryText>, Without<HudMoneyText>, Without<HudStatsText>),
+>;
+type MoneyTextQuery<'w, 's> =
+    Query<'w, 's, &'static mut Text, (With<HudMoneyText>, Without<HudInventoryText>, Without<HudStatsText>)>;
+type StatsTextQuery<'w, 's> =
+    Query<'w, 's, &'static mut Text, (With<HudStatsText>, Without<HudMoneyText>, Without<HudInventoryText>)>;
 
 fn setup_hud(mut commands: Commands) {
     // Barre du haut (argent)
@@ -95,30 +109,40 @@ fn setup_hud(mut commands: Commands) {
         });
 }
 
+/// Texte de la barre d'inventaire (pur, testable).
+fn inventory_bar_text(inventory: &Inventory, stats: &PlayerStats) -> String {
+    let count = inventory.total_count();
+    let cap = stats.inventory_capacity;
+    let content = if inventory.items.is_empty() {
+        "vide".to_string()
+    } else {
+        TileType::all_ordered()
+            .iter()
+            .filter_map(|t| inventory.items.get(t).map(|qty| format!("{} x{}", t.label(), qty)))
+            .collect::<Vec<_>>()
+            .join("   ")
+    };
+    let mut text = format!("Inventaire ({}/{}) : {}", count, cap, content);
+    if inventory.is_full(stats) {
+        text.push_str("   !! SAC PLEIN — retourne vendre ! !!");
+    }
+    text
+}
+
 fn update_hud(
     inventory: Res<Inventory>,
     wallet: Res<Wallet>,
     stats: Res<PlayerStats>,
-    mut inv_query: Query<&mut Text, (With<HudInventoryText>, Without<HudMoneyText>, Without<HudStatsText>)>,
-    mut money_query: Query<&mut Text, (With<HudMoneyText>, Without<HudInventoryText>, Without<HudStatsText>)>,
+    mut inv_query: InventoryTextQuery,
+    mut money_query: MoneyTextQuery,
 ) {
-    if inventory.is_changed() {
-        let mut text = inv_query.single_mut();
-        if inventory.items.is_empty() {
-            *text = Text::new(format!("Inventaire (0/{}) : vide", stats.inventory_capacity));
-        } else {
-            let parts: Vec<String> = TileType::all_ordered()
-                .iter()
-                .filter_map(|t| {
-                    inventory.items.get(t).map(|qty| format!("{} x{}", t.label(), qty))
-                })
-                .collect();
-            *text = Text::new(format!(
-                "Inventaire ({}/{}) : {}",
-                inventory.total_count(),
-                stats.inventory_capacity,
-                parts.join("   ")
-            ));
+    // Redessine aussi quand les stats changent (ex: amélioration du sac)
+    if inventory.is_changed() || stats.is_changed() {
+        let (mut text, mut color) = inv_query.single_mut();
+        *text = Text::new(inventory_bar_text(&inventory, &stats));
+        let wanted = if inventory.is_full(&stats) { INVENTORY_FULL_COLOR } else { INVENTORY_COLOR };
+        if color.0 != wanted {
+            color.0 = wanted;
         }
     }
 
@@ -128,6 +152,7 @@ fn update_hud(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // système Bevy : une ressource/query par paramètre
 fn update_stats_panel(
     stats: Res<PlayerStats>,
     inventory: Res<Inventory>,
@@ -138,7 +163,7 @@ fn update_stats_panel(
     player_query: Query<&Transform, With<Player>>,
     deposit_query: Query<(&GridPos, &Deposit), Without<AutoMiner>>,
     miner_query: Query<(&GridPos, &AutoMiner)>,
-    mut text_query: Query<&mut Text, (With<HudStatsText>, Without<HudMoneyText>, Without<HudInventoryText>)>,
+    mut text_query: StatsTextQuery,
 ) {
     let pos = player_query.single().translation.truncate();
     let player_grid = GridPos::from_world(pos);
@@ -146,13 +171,14 @@ fn update_stats_panel(
     let dist = player_grid.distance_from_center();
     let zone = Zone::from_distance(dist).label();
 
+    let full = if inventory.is_full(&stats) { " PLEIN" } else { "" };
     let mut info = format!(
         "-- Stats --\n\
          Pos: ({}, {})\n\
          Zone: {} (dist {})\n\
          Puissance: {}\n\
          Vitesse: {}\n\
-         Sac: {}/{}\n\
+         Sac: {}/{}{}\n\
          Argent: {} c\n\
          Mineurs: {}\n\
          Bots: {}",
@@ -160,7 +186,7 @@ fn update_stats_panel(
         zone, dist,
         stats.mining_power,
         stats.walk_speed,
-        inventory.total_count(), stats.inventory_capacity,
+        inventory.total_count(), stats.inventory_capacity, full,
         wallet.money,
         miner_inv.count,
         bot_inv.count,
@@ -168,7 +194,7 @@ fn update_stats_panel(
 
     if conveyor_state.tracing {
         let tile_count = conveyor_state.current_path.len();
-        let cost = tile_count as u64 * 10;
+        let cost = tile_count as u64 * CONVEYOR_COST;
         info.push_str(&format!(
             "\n\n>> MODE TAPIS <<\nTiles: {} (cout: {} c)\n[T] Terminer",
             tile_count, cost
@@ -178,32 +204,49 @@ fn update_stats_panel(
     }
 
     // Afficher les infos du gisement si le joueur est dessus
-    for (grid_pos, deposit) in deposit_query.iter() {
-        if *grid_pos == player_grid && deposit.revealed {
-            info.push_str(&format!("\n\n-- Gisement --\n{}\n", deposit.deposit_type.label()));
-            info.push_str("Drop:\n");
-            let drop_table = deposit.deposit_type.drop_table();
-            let mut prev = 0.0_f32;
-            for (tile_type, threshold) in drop_table {
-                let pct = (threshold - prev) * 100.0;
-                info.push_str(&format!("  {} : {:.0}%\n", tile_type.label(), pct));
-                prev = *threshold;
-            }
+    if let Some((grid_pos, deposit)) = deposit_query
+        .iter()
+        .find(|(gp, d)| **gp == player_grid && d.revealed)
+    {
+        info.push_str(&format!("\n\n-- Gisement --\n{}\n", deposit.deposit_type.label()));
+        info.push_str("Drop:\n");
+        let mut prev = 0.0_f32;
+        for (tile_type, threshold) in deposit.deposit_type.drop_table() {
+            let pct = (threshold - prev) * 100.0;
+            info.push_str(&format!("  {} : {:.0}%\n", tile_type.label(), pct));
+            prev = *threshold;
+        }
 
-            // Vérifier si un mineur est posé dessus
-            let has_miner = miner_query.iter().any(|(mp, _)| *mp == *grid_pos);
-            if has_miner {
-                if let Some((_, miner)) = miner_query.iter().find(|(mp, _)| **mp == *grid_pos) {
-                    let total: u32 = miner.storage.values().sum();
-                    info.push_str(&format!("Mineur: stock {}/50", total));
-                }
-            } else {
-                info.push_str("[B] Poser un mineur");
+        match miner_query.iter().find(|(mp, _)| *mp == grid_pos) {
+            Some((_, miner)) => {
+                let total: u32 = miner.storage.values().sum();
+                info.push_str(&format!("Mineur: stock {}/{}", total, MAX_MINER_STORAGE));
             }
-            break;
+            None => info.push_str("[B] Poser un mineur"),
         }
     }
 
+    // N'écrit le texte (et ne déclenche le re-layout) que si le contenu a changé
     let mut text = text_query.single_mut();
-    *text = Text::new(info);
+    if text.0 != info {
+        text.0 = info;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inventory_bar_shows_full_warning_only_when_full() {
+        let stats = PlayerStats::default();
+        let mut inv = Inventory::default();
+        assert!(!inventory_bar_text(&inv, &stats).contains("SAC PLEIN"));
+        inv.items.insert(TileType::Stone, stats.inventory_capacity - 1);
+        assert!(!inventory_bar_text(&inv, &stats).contains("SAC PLEIN"));
+        inv.items.insert(TileType::Stone, stats.inventory_capacity);
+        let text = inventory_bar_text(&inv, &stats);
+        assert!(text.contains("SAC PLEIN"));
+        assert!(text.contains(&format!("{}/{}", stats.inventory_capacity, stats.inventory_capacity)));
+    }
 }
