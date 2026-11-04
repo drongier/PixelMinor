@@ -200,3 +200,59 @@ pub fn total_value(items: &HashMap<TileType, u32>) -> u64 {
 pub struct TileMinedEvent {
     pub pos: GridPos,
 }
+
+/// Graine de génération du monde (carte + gisements).
+/// Surchargeable via la variable d'environnement `PIXELMINER_SEED`.
+#[derive(Resource, Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorldSeed(pub u64);
+
+impl WorldSeed {
+    pub const ENV_VAR: &'static str = "PIXELMINER_SEED";
+
+    /// Lit `PIXELMINER_SEED` si présente et valide, sinon tire une graine aléatoire.
+    pub fn from_env_or_random() -> WorldSeed {
+        let from_env = std::env::var(Self::ENV_VAR)
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok());
+        WorldSeed(from_env.unwrap_or_else(rand::random))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zone_boundaries() {
+        assert_eq!(Zone::from_distance(0), Zone::Base);
+        assert_eq!(Zone::from_distance(2), Zone::Base);
+        assert_eq!(Zone::from_distance(3), Zone::Z1);
+        assert_eq!(Zone::from_distance(20), Zone::Z1);
+        assert_eq!(Zone::from_distance(21), Zone::Z2);
+        assert_eq!(Zone::from_distance(45), Zone::Z2);
+        assert_eq!(Zone::from_distance(46), Zone::Z3);
+        assert_eq!(Zone::from_distance(75), Zone::Z3);
+        assert_eq!(Zone::from_distance(76), Zone::Z4);
+        assert_eq!(Zone::from_distance(110), Zone::Z4);
+        assert_eq!(Zone::from_distance(111), Zone::Z5);
+        assert_eq!(Zone::from_distance(150), Zone::Z5);
+    }
+
+    #[test]
+    fn from_world_rounds_to_nearest() {
+        assert_eq!(GridPos::from_world(Vec2::ZERO), GridPos { x: 0, y: 0 });
+        assert_eq!(GridPos::from_world(Vec2::new(7.9, -7.9)), GridPos { x: 0, y: 0 });
+        assert_eq!(GridPos::from_world(Vec2::new(8.1, -8.1)), GridPos { x: 1, y: -1 });
+        assert_eq!(GridPos::from_world(Vec2::new(32.0, -48.0)), GridPos { x: 2, y: -3 });
+        let p = GridPos { x: -17, y: 42 };
+        assert_eq!(GridPos::from_world(p.to_world()), p);
+    }
+
+    #[test]
+    fn manhattan_distance() {
+        let a = GridPos { x: 1, y: -2 };
+        let b = GridPos { x: -3, y: 4 };
+        assert_eq!(a.manhattan(&b), 10);
+        assert_eq!(a.manhattan(&a), 0);
+    }
+}

@@ -1,9 +1,10 @@
 use bevy::prelude::*;
-use rand::Rng;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 
 use crate::world::tiles::{
-    GridPos, Tile, TileMap, TileMinedEvent, TileType, Zone, BASE_RADIUS, GRID_SIZE, HIDDEN_COLOR,
-    TILE_SIZE,
+    GridPos, Tile, TileMap, TileMinedEvent, TileType, WorldSeed, Zone, BASE_RADIUS, GRID_SIZE,
+    HIDDEN_COLOR, TILE_SIZE,
 };
 
 pub struct MapPlugin;
@@ -65,9 +66,9 @@ fn pick_tile_type(distance: i32, rng: &mut impl Rng) -> TileType {
     }
 }
 
-fn spawn_map(mut commands: Commands, mut tile_map: ResMut<TileMap>) {
+fn spawn_map(mut commands: Commands, mut tile_map: ResMut<TileMap>, seed: Res<WorldSeed>) {
     let half = GRID_SIZE / 2;
-    let mut rng = rand::thread_rng();
+    let mut rng = StdRng::seed_from_u64(seed.0);
 
     for x in -half..half {
         for y in -half..half {
@@ -123,6 +124,33 @@ fn reveal_on_mine(
                     sprite.color = tile.tile_type.color();
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample(seed: u64) -> Vec<TileType> {
+        let mut rng = StdRng::seed_from_u64(seed);
+        (3..150).map(|d| pick_tile_type(d, &mut rng)).collect()
+    }
+
+    #[test]
+    fn pick_tile_type_is_deterministic_for_seed() {
+        assert_eq!(sample(42), sample(42));
+        assert_ne!(sample(42), sample(43));
+    }
+
+    #[test]
+    fn pick_tile_type_respects_zone_tables() {
+        let mut rng = StdRng::seed_from_u64(7);
+        for _ in 0..500 {
+            let z1 = pick_tile_type(10, &mut rng);
+            assert!(matches!(z1, TileType::Dirt | TileType::Stone | TileType::Coal | TileType::Iron));
+            let z5 = pick_tile_type(130, &mut rng);
+            assert!(!matches!(z5, TileType::Dirt | TileType::Coal | TileType::Iron));
         }
     }
 }

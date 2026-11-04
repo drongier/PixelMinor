@@ -1,9 +1,10 @@
 use bevy::prelude::*;
-use rand::Rng;
-use std::collections::HashMap;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
+use std::collections::{HashMap, HashSet};
 
 use crate::world::tiles::{
-    GridPos, TileMinedEvent, TileType, Zone, BASE_RADIUS, GRID_SIZE, TILE_SIZE,
+    GridPos, TileMinedEvent, TileType, WorldSeed, Zone, BASE_RADIUS, GRID_SIZE, TILE_SIZE,
 };
 
 pub struct DepositPlugin;
@@ -110,25 +111,36 @@ pub struct Deposit {
 const DEPOSIT_COUNT: usize = 80;
 const HIDDEN_DEPOSIT_COLOR: Color = Color::srgb(0.15, 0.12, 0.10);
 
-fn spawn_deposits(mut commands: Commands, mut deposit_map: ResMut<DepositMap>) {
+/// Plafond de tirages de centres pour éviter une boucle infinie si la carte sature
+const MAX_DEPOSIT_ATTEMPTS: usize = DEPOSIT_COUNT * 50;
+
+/// Génération pure (sans ECS) des gisements : liste des cases et de leur type.
+/// Garantit l'absence de chevauchement et le respect des bornes de la carte.
+pub fn generate_deposits(seed: u64) -> Vec<(GridPos, DepositType)> {
     let half = GRID_SIZE / 2;
-    let mut rng = rand::thread_rng();
-    let mut occupied: Vec<GridPos> = Vec::new();
+    let in_bounds = |p: GridPos| (-half..half).contains(&p.x) && (-half..half).contains(&p.y);
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut occupied: HashSet<GridPos> = HashSet::new();
+    let mut result: Vec<(GridPos, DepositType)> = Vec::new();
+    let mut placed = 0;
 
-    for _ in 0..DEPOSIT_COUNT {
-        // Choisir un point central aléatoire hors de la base
-        let cx = rng.gen_range(-half..half);
-        let cy = rng.gen_range(-half..half);
-        let center = GridPos { x: cx, y: cy };
+    for _ in 0..MAX_DEPOSIT_ATTEMPTS {
+        if placed >= DEPOSIT_COUNT {
+            break;
+        }
+
+        // Choisir un point central aléatoire hors de la base et non occupé
+        let center = GridPos {
+            x: rng.gen_range(-half..half),
+            y: rng.gen_range(-half..half),
+        };
         let dist = center.distance_from_center();
-
-        if dist <= BASE_RADIUS {
+        if dist <= BASE_RADIUS || occupied.contains(&center) {
             continue;
         }
 
-        let deposit_type = match pick_deposit_type(dist, &mut rng) {
-            Some(dt) => dt,
-            None => continue,
+        let Some(deposit_type) = pick_deposit_type(dist, &mut rng) else {
+            continue;
         };
 
         // Faire croître un cluster de 2-4 tiles depuis le centre
@@ -138,11 +150,13 @@ fn spawn_deposits(mut commands: Commands, mut deposit_map: ResMut<DepositMap>) {
 
         while cluster.len() < cluster_size && !candidates.is_empty() {
             let idx = rng.gen_range(0..candidates.len());
-            let pos = candidates[idx];
-            candidates.swap_remove(idx);
+            let pos = candidates.swap_remove(idx);
 
-            let d = pos.distance_from_center();
-            if d <= BASE_RADIUS || d >= half || occupied.contains(&pos) || cluster.contains(&pos) {
+            if pos.distance_from_center() <= BASE_RADIUS
+                || !in_bounds(pos)
+                || occupied.contains(&pos)
+                || cluster.contains(&pos)
+            {
                 continue;
             }
 
@@ -154,26 +168,38 @@ fn spawn_deposits(mut commands: Commands, mut deposit_map: ResMut<DepositMap>) {
             }
         }
 
-        // Spawner les entités deposit
-        for pos in &cluster {
-            occupied.push(*pos);
-            let world = pos.to_world();
-
-            let entity = commands.spawn((
-                Deposit {
-                    deposit_type: deposit_type.clone(),
-                    revealed: false,
-                },
-                *pos,
-                Sprite {
-                    color: HIDDEN_DEPOSIT_COLOR,
-                    custom_size: Some(Vec2::splat(TILE_SIZE)),
-                    ..default()
-                },
-                Transform::from_xyz(world.x, world.y, -2.0),
-            )).id();
-            deposit_map.deposits.insert(*pos, entity);
+        for pos in cluster {
+            occupied.insert(pos);
+            result.push((pos, deposit_type.clone()));
         }
+        placed += 1;
+    }
+
+    result
+}
+
+fn spawn_deposits(
+    mut commands: Commands,
+    mut deposit_map: ResMut<DepositMap>,
+    seed: Res<WorldSeed>,
+) {
+    for (pos, deposit_type) in generate_deposits(seed.0.wrapping_add(1)) {
+        let world = pos.to_world();
+
+        let entity = commands.spawn((
+            Deposit {
+                deposit_type,
+                revealed: false,
+            },
+            pos,
+            Sprite {
+                color: HIDDEN_DEPOSIT_COLOR,
+                custom_size: Some(Vec2::splat(TILE_SIZE)),
+                ..default()
+            },
+            Transform::from_xyz(world.x, world.y, -2.0),
+        )).id();
+        deposit_map.deposits.insert(pos, entity);
     }
 }
 
@@ -192,5 +218,48 @@ fn reveal_deposits_on_mine(
                 sprite.color = deposit.deposit_type.color();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SEED: u64 = 12345;
+
+    #[test]
+    fn deposits_do_not_overlap() {
+        let deposits = generate_deposits(SEED);
+        let unique: HashSet<GridPos> = deposits.iter().map(|(p, _)| *p).collect();
+        assert_eq!(unique.len(), deposits.len());
+    }
+
+    #[test]
+    fn deposits_stay_in_bounds_and_out_of_base() {
+        let half = GRID_SIZE / 2;
+        for (p, _) in generate_deposits(SEED) {
+            assert!((-half..half).contains(&p.x) && (-half..half).contains(&p.y), "{p:?}");
+            assert!(p.distance_from_center() > BASE_RADIUS, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn deposits_have_multi_tile_clusters_beyond_zone_3() {
+        let deposits = generate_deposits(SEED);
+        let by_pos: HashMap<GridPos, DepositType> = deposits.iter().cloned().collect();
+        let far_with_neighbor = deposits
+            .iter()
+            .filter(|(p, _)| p.distance_from_center() > 75)
+            .filter(|(p, t)| p.neighbors().iter().any(|n| by_pos.get(n) == Some(t)))
+            .count();
+        assert!(far_with_neighbor > 0, "no multi-tile cluster beyond distance 75");
+    }
+
+    #[test]
+    fn deposits_place_requested_count_and_are_deterministic() {
+        let a = generate_deposits(SEED);
+        assert_eq!(a, generate_deposits(SEED));
+        // Chaque gisement fait au moins 1 case ; au moins DEPOSIT_COUNT cases au total
+        assert!(a.len() >= DEPOSIT_COUNT);
     }
 }

@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 use crate::economy::resources::{Inventory, PlayerStats, ShopOpen};
-use crate::world::tiles::{GridPos, Tile, TileMap, TileMinedEvent, TILE_SIZE};
+use crate::world::tiles::{GridPos, Tile, TileMap, TileMinedEvent, GRID_SIZE, TILE_SIZE};
 
 const PLAYER_HALF: f32 = 2.0;
 const TILE_HALF: f32 = TILE_SIZE / 2.0;
@@ -43,6 +43,22 @@ fn blocking_tile(pos: Vec2, tiles: &[(Entity, Vec2)]) -> Option<Entity> {
     None
 }
 
+type TileQuery<'w, 's> =
+    Query<'w, 's, (Entity, &'static Transform, &'static mut Tile, &'static GridPos), Without<Player>>;
+
+/// Bornes monde (min, max) du centre du joueur : il reste à l'intérieur de la grille
+/// (cases -half..half-1, chaque case centrée sur `x * TILE_SIZE`).
+fn player_bounds() -> (f32, f32) {
+    let half = GRID_SIZE / 2;
+    let min = -(half as f32) * TILE_SIZE - TILE_HALF + PLAYER_HALF;
+    let max = (half - 1) as f32 * TILE_SIZE + TILE_HALF - PLAYER_HALF;
+    (min, max)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "système Bevy : chaque paramètre est une ressource/query distincte"
+)]
 fn player_movement(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
@@ -50,7 +66,7 @@ fn player_movement(
     shop_open: Res<ShopOpen>,
     stats: Res<PlayerStats>,
     mut player_query: Query<&mut Transform, With<Player>>,
-    mut tile_query: Query<(Entity, &Transform, &mut Tile, &GridPos), Without<Player>>,
+    mut tile_query: TileQuery,
     tile_map: Res<TileMap>,
     mut inventory: ResMut<Inventory>,
     mut mine_events: EventWriter<TileMinedEvent>,
@@ -113,36 +129,48 @@ fn player_movement(
     } else {
         transform.translation.y = new_y.y;
     }
+
+    // Empêche de sortir de la carte après avoir miné une tile de bordure
+    let (min, max) = player_bounds();
+    transform.translation.x = transform.translation.x.clamp(min, max);
+    transform.translation.y = transform.translation.y.clamp(min, max);
 }
 
+/// Mine la tile bloquante. Sac plein : la tile bloque simplement (aucune perte de HP),
+/// pour ne jamais détruire une ressource qui ne peut pas être ramassée.
 fn mine_tile(
     commands: &mut Commands,
-    tile_query: &mut Query<(Entity, &Transform, &mut Tile, &GridPos), Without<Player>>,
+    tile_query: &mut TileQuery,
     entity: Entity,
     stats: &PlayerStats,
     time: &Time,
     inventory: &mut Inventory,
     mine_events: &mut EventWriter<TileMinedEvent>,
 ) {
+    if inventory.total_count() >= stats.inventory_capacity {
+        return;
+    }
     if let Ok((_, _, mut tile, grid_pos)) = tile_query.get_mut(entity) {
         tile.hp -= stats.mining_power * time.delta_secs();
         if tile.hp <= 0.0 {
-            if inventory.total_count() < stats.inventory_capacity {
-                *inventory.items.entry(tile.tile_type.clone()).or_insert(0) += 1;
-            }
+            *inventory.items.entry(tile.tile_type.clone()).or_insert(0) += 1;
             mine_events.send(TileMinedEvent { pos: *grid_pos });
             commands.entity(entity).despawn();
         }
     }
 }
 
+const CAMERA_FOLLOW_SPEED: f32 = 5.0;
+
 fn camera_follow(
+    time: Res<Time>,
     player_query: Query<&Transform, With<Player>>,
     mut camera_query: Query<&mut Transform, (With<Camera2d>, Without<Player>)>,
 ) {
     let player_pos = player_query.single().translation;
     let mut camera = camera_query.single_mut();
-    let speed = 5.0;
-    camera.translation.x += (player_pos.x - camera.translation.x) * speed * 0.016;
-    camera.translation.y += (player_pos.y - camera.translation.y) * speed * 0.016;
+    // Lissage exponentiel indépendant du framerate
+    let t = 1.0 - (-CAMERA_FOLLOW_SPEED * time.delta_secs()).exp();
+    camera.translation.x += (player_pos.x - camera.translation.x) * t;
+    camera.translation.y += (player_pos.y - camera.translation.y) * t;
 }
