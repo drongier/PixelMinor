@@ -1,10 +1,10 @@
 use bevy::prelude::*;
 use std::collections::HashMap;
 
-use crate::machines::auto_miner::AutoMiner;
+use crate::economy::resources::{GameState, Inventory, PlayerStats, Wallet};
+use crate::machines::auto_miner::{handle_b_key, transfer_storage, AutoMiner, BKeyConsumed};
 use crate::player::player::Player;
-use crate::economy::resources::{Inventory, PlayerStats, ShopOpen, Wallet};
-use crate::world::tiles::{GridPos, TileType, TILE_SIZE};
+use crate::world::tiles::{total_value, GridPos, TileType, SELL_ZONE_POS, TILE_SIZE};
 
 pub struct ConveyorPlugin;
 
@@ -12,27 +12,38 @@ impl Plugin for ConveyorPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(ConveyorState::default())
             .insert_resource(ConveyorBelts::default())
+            .init_resource::<BKeyConsumed>()
             .add_systems(Update, (
-                toggle_tracing,
-                trace_path,
-                finalize_merge,
+                // Chaînés : une fusion détectée par trace_path est finalisée dans la
+                // même frame, avant qu'un nouvel appui sur T ne puisse la perdre.
+                (
+                    toggle_tracing.run_if(in_state(GameState::Playing)),
+                    trace_path,
+                    finalize_merge,
+                )
+                    .chain(),
                 conveyor_pull,
                 conveyor_transport,
                 transfer_between_belts.after(conveyor_transport),
                 conveyor_deliver.after(transfer_between_belts),
-                collect_conveyor_end,
+                // B : placer/collecter un mineur est prioritaire sur le bout de tapis
+                collect_conveyor_end
+                    .after(handle_b_key)
+                    .run_if(in_state(GameState::Playing)),
                 update_conveyor_visuals,
             ));
     }
 }
 
-const CONVEYOR_COST: u64 = 10;
+pub const CONVEYOR_COST: u64 = 10;
 const TRANSPORT_INTERVAL: f32 = 5.0;
 const CONVEYOR_COLOR: Color = Color::srgb(0.45, 0.45, 0.50);
 const CONVEYOR_PREVIEW_COLOR: Color = Color::srgba(0.45, 0.45, 0.50, 0.5);
 
 // Proximité pour considérer qu'on est "dans" la zone de vente (en tiles)
 const SELL_ZONE_PROXIMITY: i32 = 3;
+// Distance max (en tiles) pour collecter en bout de tapis
+const BELT_END_PROXIMITY: i32 = 2;
 
 #[derive(Resource, Default)]
 pub struct ConveyorState {
@@ -67,36 +78,86 @@ struct ConveyorTile {
     index: usize,
 }
 
+/// Montant payé pour un tracé de `path_len` tiles.
+///
+/// Chaque tile posée est payée (y compris la première, au démarrage du tracé),
+/// sauf lors d'une fusion : la dernière tile du path est alors celle du tapis
+/// existant, qui est gratuite. Tout remboursement doit utiliser cette fonction
+/// pour être strictement égal à ce qui a été débité.
+pub fn path_cost(path_len: usize, merging: bool) -> u64 {
+    let paid_tiles = if merging { path_len.saturating_sub(1) } else { path_len };
+    paid_tiles as u64 * CONVEYOR_COST
+}
+
 fn is_near_sell_zone(pos: &GridPos) -> bool {
-    let sell_grid = GridPos { x: 0, y: -2 };
-    let dist = (pos.x - sell_grid.x).abs() + (pos.y - sell_grid.y).abs();
-    dist <= SELL_ZONE_PROXIMITY
+    // La zone de vente est centrée à mi-chemin entre deux cases (y = -2.5 tiles) :
+    // on prend la case côté base (y = -2) pour conserver le comportement historique.
+    let sell_grid = GridPos::from_world(SELL_ZONE_POS + Vec2::new(0.0, TILE_SIZE / 2.0));
+    pos.manhattan(&sell_grid) <= SELL_ZONE_PROXIMITY
 }
 
-/// Vérifie si N'IMPORTE QUEL tile du path est adjacent à un mineur
+/// Vérifie si N'IMPORTE QUEL tile du path est sur ou adjacent à un mineur
 fn path_connects_to_miner(path: &[GridPos], miner_positions: &[GridPos]) -> bool {
-    for pos in path {
-        let neighbors = pos.neighbors();
-        for mp in miner_positions {
-            if neighbors.contains(mp) || *mp == *pos {
-                return true;
-            }
-        }
-    }
-    false
+    path.iter()
+        .any(|pos| miner_positions.iter().any(|mp| pos.manhattan(mp) <= 1))
 }
 
+fn spawn_preview(commands: &mut Commands, grid: GridPos) -> Entity {
+    let world = grid.to_world();
+    commands
+        .spawn((
+            Sprite {
+                color: CONVEYOR_PREVIEW_COLOR,
+                custom_size: Some(Vec2::splat(TILE_SIZE * 0.8)),
+                ..default()
+            },
+            Transform::from_xyz(world.x, world.y, -1.5),
+        ))
+        .id()
+}
+
+/// Annule un tracé : supprime les previews et rembourse exactement ce qui a été payé.
+fn cancel_path(
+    commands: &mut Commands,
+    wallet: &mut Wallet,
+    path_len: usize,
+    merging: bool,
+    preview_entities: &[Entity],
+) {
+    wallet.money += path_cost(path_len, merging);
+    for entity in preview_entities {
+        commands.entity(*entity).despawn();
+    }
+}
+
+/// Transforme les previews en tiles de tapis définitives.
+/// `preview_entities[i]` correspond à `path[i]`.
+fn commit_previews(commands: &mut Commands, belt_id: u32, path: &[GridPos], preview_entities: &[Entity]) {
+    for (i, entity) in preview_entities.iter().enumerate() {
+        commands.entity(*entity).insert((
+            ConveyorTile { belt_id, index: i },
+            path[i],
+            Sprite {
+                color: CONVEYOR_COLOR,
+                custom_size: Some(Vec2::splat(TILE_SIZE * 0.8)),
+                ..default()
+            },
+        ));
+    }
+}
+
+#[allow(clippy::too_many_arguments, reason = "Bevy system: each param is a distinct resource/query")]
 fn toggle_tracing(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
-    shop_open: Res<ShopOpen>,
     mut state: ResMut<ConveyorState>,
     mut belts: ResMut<ConveyorBelts>,
     mut wallet: ResMut<Wallet>,
     player_query: Query<&Transform, With<Player>>,
     miner_query: Query<&GridPos, With<AutoMiner>>,
+    conveyor_tile_query: Query<&GridPos, With<ConveyorTile>>,
 ) {
-    if !keys.just_pressed(KeyCode::KeyT) || shop_open.0 {
+    if !keys.just_pressed(KeyCode::KeyT) {
         return;
     }
 
@@ -112,88 +173,55 @@ fn toggle_tracing(
         state.last_grid = None;
 
         if path.len() < 2 {
-            let refund = path.len() as u64 * CONVEYOR_COST;
-            wallet.money += refund;
-            for entity in &preview_entities {
-                commands.entity(*entity).despawn();
-            }
+            cancel_path(&mut commands, &mut wallet, path.len(), false, &preview_entities);
             state.build_error = Some("Tapis trop court (min 2 tiles)");
             return;
         }
 
         // Vérifier qu'au moins un tile du path est adjacent à un mineur
         let miner_positions: Vec<GridPos> = miner_query.iter().copied().collect();
-        let has_miner = path_connects_to_miner(&path, &miner_positions);
-
-        if !has_miner {
-            let refund = path.len() as u64 * CONVEYOR_COST;
-            wallet.money += refund;
-            for entity in &preview_entities {
-                commands.entity(*entity).despawn();
-            }
+        if !path_connects_to_miner(&path, &miner_positions) {
+            cancel_path(&mut commands, &mut wallet, path.len(), false, &preview_entities);
             state.build_error = Some("Aucun mineur adjacent au tapis !");
             return;
         }
 
-        // Vérifier si la fin est dans la zone de vente
-        let end = &path[path.len() - 1];
-        let sells_at_end = is_near_sell_zone(end);
-
         let belt_id = belts.next_id;
         belts.next_id += 1;
 
-        let slot_count = path.len();
+        commit_previews(&mut commands, belt_id, &path, &preview_entities);
         belts.belts.push(Belt {
             id: belt_id,
-            path: path.clone(),
-            slots: vec![None; slot_count],
+            sells_at_end: is_near_sell_zone(&path[path.len() - 1]),
+            slots: vec![None; path.len()],
+            path,
             timer: Timer::from_seconds(TRANSPORT_INTERVAL, TimerMode::Repeating),
             end_storage: HashMap::new(),
-            sells_at_end,
             feeds_into: None,
         });
-
-        // Convertir les previews en tiles finales
-        // preview_entities[i] correspond à path[i] (même index)
-        for (i, entity) in preview_entities.iter().enumerate() {
-            commands.entity(*entity).insert((
-                ConveyorTile {
-                    belt_id,
-                    index: i,
-                },
-                path[i],
-            ));
-            // Mettre la couleur finale (opaque)
-            commands.entity(*entity).insert(Sprite {
-                color: CONVEYOR_COLOR,
-                custom_size: Some(Vec2::splat(TILE_SIZE * 0.8)),
-                ..default()
-            });
-        }
     } else {
         // Début du traçage
         let player_pos = player_query.single().translation.truncate();
-        let grid = GridPos {
-            x: (player_pos.x / TILE_SIZE).round() as i32,
-            y: (player_pos.y / TILE_SIZE).round() as i32,
-        };
+        let grid = GridPos::from_world(player_pos);
+
+        if conveyor_tile_query.iter().any(|pos| *pos == grid) {
+            state.build_error = Some("Il y a déjà un tapis ici !");
+            return;
+        }
+
+        // La première tile est payée dès le début du tracé
+        if wallet.money < CONVEYOR_COST {
+            state.build_error = Some("Pas assez d'argent !");
+            return;
+        }
+        wallet.money -= CONVEYOR_COST;
 
         state.tracing = true;
         state.current_path.clear();
-        state.preview_entities.clear();
-        state.last_grid = Some(grid);
-
-        // Ajouter le premier tile AU path ET créer sa preview
         state.current_path.push(grid);
-        let world = grid.to_world();
-        let entity = commands.spawn((
-            Sprite {
-                color: CONVEYOR_PREVIEW_COLOR,
-                custom_size: Some(Vec2::splat(TILE_SIZE * 0.8)),
-                ..default()
-            },
-            Transform::from_xyz(world.x, world.y, -1.5),
-        )).id();
+        state.last_grid = Some(grid);
+        let entity = spawn_preview(&mut commands, grid);
+        state.preview_entities.clear();
         state.preview_entities.push(entity);
     }
 }
@@ -210,36 +238,29 @@ fn trace_path(
     }
 
     let player_pos = player_query.single().translation.truncate();
-    let grid = GridPos {
-        x: (player_pos.x / TILE_SIZE).round() as i32,
-        y: (player_pos.y / TILE_SIZE).round() as i32,
-    };
+    let grid = GridPos::from_world(player_pos);
 
-    if let Some(last) = state.last_grid {
-        if grid == last {
-            return;
-        }
+    if state.last_grid == Some(grid) {
+        return;
     }
 
+    // Le tapis en cours de tracé n'est pas fusionnable avec lui-même : ses tiles
+    // sont encore des previews (sans ConveyorTile) et sont ignorées ici.
     if state.current_path.contains(&grid) {
         return;
     }
 
-    // Vérifier si on marche sur un tapis existant → fusion automatique
-    let existing = conveyor_tile_query.iter().find(|(pos, _)| **pos == grid);
-    if let Some((_, conv_tile)) = existing {
-        // Marquer la fusion : on ajoute le grid au path mais on arrête le traçage
+    // Marcher sur un tapis existant → fusion automatique (tile gratuite)
+    if let Some((_, conv_tile)) = conveyor_tile_query.iter().find(|(pos, _)| **pos == grid) {
         state.current_path.push(grid);
         state.last_grid = Some(grid);
-        // Stocker les infos de fusion dans build_error temporairement
-        // On va gérer ça proprement via un flag
         state.tracing = false;
         state.merge_target = Some((conv_tile.belt_id, conv_tile.index));
         return;
     }
 
+    // Plus d'argent : on n'étend plus le tracé, le joueur peut valider avec T.
     if wallet.money < CONVEYOR_COST {
-        state.tracing = false;
         state.build_error = Some("Plus assez d'argent !");
         return;
     }
@@ -247,16 +268,7 @@ fn trace_path(
     wallet.money -= CONVEYOR_COST;
     state.current_path.push(grid);
     state.last_grid = Some(grid);
-
-    let world = grid.to_world();
-    let entity = commands.spawn((
-        Sprite {
-            color: CONVEYOR_PREVIEW_COLOR,
-            custom_size: Some(Vec2::splat(TILE_SIZE * 0.8)),
-            ..default()
-        },
-        Transform::from_xyz(world.x, world.y, -1.5),
-    )).id();
+    let entity = spawn_preview(&mut commands, grid);
     state.preview_entities.push(entity);
 }
 
@@ -268,9 +280,8 @@ fn finalize_merge(
     mut wallet: ResMut<Wallet>,
     miner_query: Query<&GridPos, With<AutoMiner>>,
 ) {
-    let merge_target = match state.merge_target.take() {
-        Some(t) => t,
-        None => return,
+    let Some(merge_target) = state.merge_target.take() else {
+        return;
     };
 
     let path = std::mem::take(&mut state.current_path);
@@ -278,23 +289,15 @@ fn finalize_merge(
     state.last_grid = None;
 
     if path.len() < 2 {
-        for entity in &preview_entities {
-            commands.entity(*entity).despawn();
-        }
+        cancel_path(&mut commands, &mut wallet, path.len(), true, &preview_entities);
         state.build_error = Some("Tapis trop court (min 2 tiles)");
         return;
     }
 
     // Vérifier la connexion à un mineur
     let miner_positions: Vec<GridPos> = miner_query.iter().copied().collect();
-    let has_miner = path_connects_to_miner(&path, &miner_positions);
-
-    if !has_miner {
-        let refund = (path.len() - 1) as u64 * CONVEYOR_COST;
-        wallet.money += refund;
-        for entity in &preview_entities {
-            commands.entity(*entity).despawn();
-        }
+    if !path_connects_to_miner(&path, &miner_positions) {
+        cancel_path(&mut commands, &mut wallet, path.len(), true, &preview_entities);
         state.build_error = Some("Aucun mineur adjacent au tapis !");
         return;
     }
@@ -302,80 +305,52 @@ fn finalize_merge(
     let belt_id = belts.next_id;
     belts.next_id += 1;
 
-    let slot_count = path.len() - 1; // Le dernier tile est celui du tapis existant, pas un slot
+    // Le dernier tile est celui du tapis existant : ni slot ni preview
+    let own_path = path[..path.len() - 1].to_vec();
+    commit_previews(&mut commands, belt_id, &own_path, &preview_entities);
     belts.belts.push(Belt {
         id: belt_id,
-        path: path[..path.len() - 1].to_vec(), // Path sans le tile de fusion
-        slots: vec![None; slot_count],
+        slots: vec![None; own_path.len()],
+        path: own_path,
         timer: Timer::from_seconds(TRANSPORT_INTERVAL, TimerMode::Repeating),
         end_storage: HashMap::new(),
         sells_at_end: false,
         feeds_into: Some(merge_target),
     });
-
-    // Convertir les previews en tiles finales (sauf la dernière qui est le tile existant)
-    for (i, entity) in preview_entities.iter().enumerate() {
-        commands.entity(*entity).insert((
-            ConveyorTile {
-                belt_id,
-                index: i,
-            },
-            path[i],
-        ));
-        commands.entity(*entity).insert(Sprite {
-            color: CONVEYOR_COLOR,
-            custom_size: Some(Vec2::splat(TILE_SIZE * 0.8)),
-            ..default()
-        });
-    }
 }
 
 /// Transfère les ressources d'un belt qui feeds_into un autre
-fn transfer_between_belts(
-    mut belts: ResMut<ConveyorBelts>,
-) {
-    // Collecter les transferts à faire : (source_belt_id, target_belt_id, target_index, tile_type)
-    let mut transfers: Vec<(u32, u32, usize, TileType)> = Vec::new();
-
-    for belt in belts.belts.iter() {
-        if let Some((target_belt_id, target_index)) = belt.feeds_into {
-            if !belt.end_storage.is_empty() {
-                if let Some((tile_type, _)) = belt.end_storage.iter().find(|(_, qty)| **qty > 0) {
-                    transfers.push((belt.id, target_belt_id, target_index, tile_type.clone()));
-                }
-            }
-        }
-    }
+fn transfer_between_belts(mut belts: ResMut<ConveyorBelts>) {
+    // Transferts à faire : (source_belt_id, target_belt_id, target_index, tile_type)
+    let transfers: Vec<(u32, u32, usize, TileType)> = belts
+        .belts
+        .iter()
+        .filter_map(|belt| {
+            let (target_belt_id, target_index) = belt.feeds_into?;
+            let (tile_type, _) = belt.end_storage.iter().find(|(_, qty)| **qty > 0)?;
+            Some((belt.id, target_belt_id, target_index, tile_type.clone()))
+        })
+        .collect();
 
     for (source_id, target_belt_id, target_index, tile_type) in transfers {
-        // Trouver un slot libre sur le tapis cible (au point de jonction ou après)
-        let injected = {
-            let target = belts.belts.iter_mut().find(|b| b.id == target_belt_id);
-            if let Some(target) = target {
-                let mut slot_found = false;
-                // Essayer le slot de jonction d'abord, puis les slots suivants
-                for i in target_index..target.slots.len() {
-                    if target.slots[i].is_none() {
-                        target.slots[i] = Some(tile_type.clone());
-                        slot_found = true;
-                        break;
-                    }
-                }
-                slot_found
-            } else {
-                false
-            }
-        };
+        // Slot libre sur le tapis cible : jonction d'abord, puis les suivants
+        let injected = belts
+            .belts
+            .iter_mut()
+            .find(|b| b.id == target_belt_id)
+            .and_then(|target| target.slots.iter_mut().skip(target_index).find(|s| s.is_none()))
+            .map(|slot| *slot = Some(tile_type.clone()))
+            .is_some();
 
         // Retirer du source seulement si l'injection a réussi
-        if injected {
-            let source = belts.belts.iter_mut().find(|b| b.id == source_id);
-            if let Some(source) = source {
-                if let Some(qty) = source.end_storage.get_mut(&tile_type) {
-                    *qty -= 1;
-                    if *qty == 0 {
-                        source.end_storage.remove(&tile_type);
-                    }
+        if !injected {
+            continue;
+        }
+        if let Some(source) = belts.belts.iter_mut().find(|b| b.id == source_id) {
+            if let Some(qty) = source.end_storage.get_mut(&tile_type) {
+                *qty -= 1;
+                if *qty == 0 {
+                    source.end_storage.remove(&tile_type);
                 }
             }
         }
@@ -391,11 +366,10 @@ fn conveyor_pull(
             continue;
         }
 
-        let start = &belt.path[0];
-        let start_neighbors = start.neighbors();
+        let start = belt.path[0];
 
         for (miner_pos, mut miner) in miner_query.iter_mut() {
-            if !start_neighbors.contains(miner_pos) && *miner_pos != *start {
+            if start.manhattan(miner_pos) > 1 {
                 continue;
             }
 
@@ -417,10 +391,7 @@ fn conveyor_pull(
     }
 }
 
-fn conveyor_transport(
-    time: Res<Time>,
-    mut belts: ResMut<ConveyorBelts>,
-) {
+fn conveyor_transport(time: Res<Time>, mut belts: ResMut<ConveyorBelts>) {
     for belt in belts.belts.iter_mut() {
         belt.timer.tick(time.delta());
 
@@ -449,54 +420,43 @@ fn update_conveyor_visuals(
         let Some(belt) = belts.belts.iter().find(|b| b.id == conv_tile.belt_id) else {
             continue;
         };
-
-        if conv_tile.index >= belt.slots.len() {
+        let Some(slot) = belt.slots.get(conv_tile.index) else {
             continue;
-        }
+        };
 
-        sprite.color = match &belt.slots[conv_tile.index] {
+        sprite.color = match slot {
             Some(tile_type) => tile_type.color(),
             None => CONVEYOR_COLOR,
         };
     }
 }
 
-fn conveyor_deliver(
-    mut belts: ResMut<ConveyorBelts>,
-    mut wallet: ResMut<Wallet>,
-) {
+fn conveyor_deliver(mut belts: ResMut<ConveyorBelts>, mut wallet: ResMut<Wallet>) {
     for belt in belts.belts.iter_mut() {
         if !belt.sells_at_end || belt.end_storage.is_empty() {
             continue;
         }
 
-        let total: u64 = belt.end_storage
-            .iter()
-            .map(|(t, qty)| t.value() * (*qty as u64))
-            .sum();
-
-        wallet.money += total;
+        wallet.money += total_value(&belt.end_storage);
         belt.end_storage.clear();
     }
 }
 
 fn collect_conveyor_end(
     keys: Res<ButtonInput<KeyCode>>,
-    shop_open: Res<ShopOpen>,
+    consumed: Res<BKeyConsumed>,
     mut belts: ResMut<ConveyorBelts>,
     mut inventory: ResMut<Inventory>,
     stats: Res<PlayerStats>,
     player_query: Query<&Transform, With<Player>>,
 ) {
-    if !keys.just_pressed(KeyCode::KeyB) || shop_open.0 {
+    // Appui déjà utilisé par le mineur (placement / collecte) → rien ici
+    if !keys.just_pressed(KeyCode::KeyB) || consumed.0 {
         return;
     }
 
     let player_pos = player_query.single().translation.truncate();
-    let player_grid = GridPos {
-        x: (player_pos.x / TILE_SIZE).round() as i32,
-        y: (player_pos.y / TILE_SIZE).round() as i32,
-    };
+    let player_grid = GridPos::from_world(player_pos);
 
     for belt in belts.belts.iter_mut() {
         if belt.sells_at_end || belt.end_storage.is_empty() {
@@ -504,25 +464,75 @@ fn collect_conveyor_end(
         }
 
         let end = belt.path[belt.path.len() - 1];
-        let dist = (player_grid.x - end.x).abs() + (player_grid.y - end.y).abs();
-
-        if dist > 2 {
+        if player_grid.manhattan(&end) > BELT_END_PROXIMITY {
             continue;
         }
 
         let capacity_left = stats.inventory_capacity.saturating_sub(inventory.total_count());
-        let mut transferred = 0u32;
+        transfer_storage(&mut belt.end_storage, &mut inventory.items, capacity_left);
+    }
+}
 
-        for (tile_type, qty) in belt.end_storage.iter_mut() {
-            if transferred >= capacity_left {
-                break;
-            }
-            let can_take = (*qty).min(capacity_left - transferred);
-            *inventory.items.entry(tile_type.clone()).or_insert(0) += can_take;
-            *qty -= can_take;
-            transferred += can_take;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Simule le débit réel : 1 tile payée au démarrage, puis 1 par tile tracée,
+    /// et 0 pour la tile de fusion.
+    fn simulate_paid(placed_tiles: usize) -> u64 {
+        let first = CONVEYOR_COST; // toggle_tracing
+        let traced = (placed_tiles - 1) as u64 * CONVEYOR_COST; // trace_path
+        first + traced
+    }
+
+    #[test]
+    fn start_only_refund_equals_paid() {
+        // T T : un seul tile, trop court → remboursé intégralement
+        assert_eq!(path_cost(1, false), simulate_paid(1));
+        assert_eq!(path_cost(1, false), CONVEYOR_COST);
+    }
+
+    #[test]
+    fn normal_belt_cost_equals_paid() {
+        for len in 2..10 {
+            assert_eq!(path_cost(len, false), simulate_paid(len));
         }
+    }
 
-        belt.end_storage.retain(|_, qty| *qty > 0);
+    #[test]
+    fn failed_belt_refund_equals_paid() {
+        // Tapis sans mineur adjacent : refund == paid, donc bilan net nul
+        let len = 5;
+        let paid = simulate_paid(len);
+        let refund = path_cost(len, false);
+        assert_eq!(paid, refund);
+    }
+
+    #[test]
+    fn merge_belt_refund_equals_paid() {
+        // path = tiles posées + tile du tapis existant (gratuite)
+        for placed in 1..10 {
+            let path_len = placed + 1;
+            assert_eq!(path_cost(path_len, true), simulate_paid(placed));
+        }
+    }
+
+    #[test]
+    fn repeated_start_stop_does_not_print_money() {
+        let mut money: u64 = 500;
+        for _ in 0..100 {
+            money -= CONVEYOR_COST; // démarrage
+            money += path_cost(1, false); // arrêt immédiat
+        }
+        assert_eq!(money, 500);
+    }
+
+    #[test]
+    fn path_connects_to_adjacent_miner_only() {
+        let path = [GridPos { x: 0, y: 0 }, GridPos { x: 1, y: 0 }];
+        assert!(path_connects_to_miner(&path, &[GridPos { x: 2, y: 0 }]));
+        assert!(path_connects_to_miner(&path, &[GridPos { x: 0, y: 0 }]));
+        assert!(!path_connects_to_miner(&path, &[GridPos { x: 2, y: 1 }]));
+        assert!(!path_connects_to_miner(&path, &[]));
     }
 }

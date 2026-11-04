@@ -2,7 +2,7 @@ use bevy::prelude::*;
 
 use crate::player::player::Player;
 use crate::economy::resources::{Inventory, Wallet};
-use crate::world::tiles::TILE_SIZE;
+use crate::world::tiles::{total_value, SELL_ZONE_POS, TILE_SIZE};
 
 const SELL_ZONE_SIZE: f32 = TILE_SIZE * 2.0;
 
@@ -26,7 +26,7 @@ fn spawn_sell_zone(mut commands: Commands) {
             custom_size: Some(Vec2::splat(SELL_ZONE_SIZE)),
             ..default()
         },
-        Transform::from_xyz(0.0, -40.0, -2.0),
+        Transform::from_xyz(SELL_ZONE_POS.x, SELL_ZONE_POS.y, -2.0),
     ));
 }
 
@@ -47,12 +47,6 @@ fn sell_zone_system(
         return;
     }
 
-    let total: u64 = inventory
-        .items
-        .iter()
-        .map(|(t, qty)| t.value() * (*qty as u64))
-        .sum();
-
-    wallet.money += total;
+    wallet.money += total_value(&inventory.items);
     inventory.items.clear();
 }

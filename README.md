@@ -111,6 +111,14 @@ Open the shop with **E** when standing in the shop zone (pink tile near the base
 | [4]  | Auto Miner     | 100 each   | Place on deposits for auto mining  |
 | [5]  | Scout Bot      | 50 each    | Finds the nearest hidden deposit   |
 
+Upgrade tiers (value, with cost in coins):
+
+- **Pickaxe** (power): 5 (start), 8 (50), 12 (200), 18 (1000), 28 (5000)
+- **Bag** (capacity): 50 (start), 80 (100), 120 (500), 200 (2000), 350 (10000)
+- **Speed** (base 250): x1.0 (start), x1.3 (300), x1.6 (1500), x2.0 (8000)
+
+When the bag is full, mining stops (the tile simply blocks you) until you sell.
+
 ---
 
 ## Auto Miners
@@ -125,13 +133,14 @@ Open the shop with **E** when standing in the shop zone (pink tile near the base
 - Press **G** to launch from your position
 - The bot moves toward the **nearest hidden deposit**
 - It **mines every tile in its path** (same power as the player)
-- On arrival, it **reveals the deposit and self destructs**
+- On arrival, it **reveals the whole deposit cluster and self destructs**
+- Deposits already targeted by another bot are skipped
 
 ## Conveyor Belts
 
 - Press **T** to start tracing, walk to draw the path, press **T** again to finish
-- Each tile costs **10 coins**
-- Must pass near an auto miner to connect (otherwise refunded)
+- Each tile costs **10 coins**, including the first one (paid when you press **T**); the tile of an existing belt you merge into is free
+- Must pass near an auto miner to connect (otherwise everything paid is refunded)
 - Resources travel at **1 tile per 5 seconds**
 - Each belt tile shows the **color of the ore** it is carrying
 - If the end of the belt is near the sell zone, resources are **sold automatically**
@@ -190,6 +199,12 @@ src/
 ```bash
 cd pixel_miner
 cargo run
+```
+
+The world (map + deposits) is generated from a seed, logged at startup. Replay a world with:
+
+```bash
+PIXELMINER_SEED=42 cargo run
 ```
 
 ### Dependencies
