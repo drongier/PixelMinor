@@ -19,8 +19,14 @@ impl Default for Wallet {
     }
 }
 
-#[derive(Resource, Default)]
-pub struct ShopOpen(pub bool);
+/// État de jeu. Seuls les systèmes d'entrée joueur sont filtrés par cet état :
+/// la production (mineurs, tapis, bots) continue pendant que le shop est ouvert.
+#[derive(States, Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GameState {
+    #[default]
+    Playing,
+    InShop,
+}
 
 // --- Upgrade tiers (source unique de vérité pour les stats du joueur) ---
 

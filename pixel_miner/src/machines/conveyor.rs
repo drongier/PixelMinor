@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use std::collections::HashMap;
 
-use crate::economy::resources::{Inventory, PlayerStats, ShopOpen, Wallet};
+use crate::economy::resources::{GameState, Inventory, PlayerStats, Wallet};
 use crate::machines::auto_miner::{handle_b_key, transfer_storage, AutoMiner, BKeyConsumed};
 use crate::player::player::Player;
 use crate::world::tiles::{total_value, GridPos, TileType, SELL_ZONE_POS, TILE_SIZE};
@@ -16,13 +16,20 @@ impl Plugin for ConveyorPlugin {
             .add_systems(Update, (
                 // Chaînés : une fusion détectée par trace_path est finalisée dans la
                 // même frame, avant qu'un nouvel appui sur T ne puisse la perdre.
-                (toggle_tracing, trace_path, finalize_merge).chain(),
+                (
+                    toggle_tracing.run_if(in_state(GameState::Playing)),
+                    trace_path,
+                    finalize_merge,
+                )
+                    .chain(),
                 conveyor_pull,
                 conveyor_transport,
                 transfer_between_belts.after(conveyor_transport),
                 conveyor_deliver.after(transfer_between_belts),
                 // B : placer/collecter un mineur est prioritaire sur le bout de tapis
-                collect_conveyor_end.after(handle_b_key),
+                collect_conveyor_end
+                    .after(handle_b_key)
+                    .run_if(in_state(GameState::Playing)),
                 update_conveyor_visuals,
             ));
     }
@@ -143,7 +150,6 @@ fn commit_previews(commands: &mut Commands, belt_id: u32, path: &[GridPos], prev
 fn toggle_tracing(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
-    shop_open: Res<ShopOpen>,
     mut state: ResMut<ConveyorState>,
     mut belts: ResMut<ConveyorBelts>,
     mut wallet: ResMut<Wallet>,
@@ -151,7 +157,7 @@ fn toggle_tracing(
     miner_query: Query<&GridPos, With<AutoMiner>>,
     conveyor_tile_query: Query<&GridPos, With<ConveyorTile>>,
 ) {
-    if !keys.just_pressed(KeyCode::KeyT) || shop_open.0 {
+    if !keys.just_pressed(KeyCode::KeyT) {
         return;
     }
 
@@ -438,7 +444,6 @@ fn conveyor_deliver(mut belts: ResMut<ConveyorBelts>, mut wallet: ResMut<Wallet>
 
 fn collect_conveyor_end(
     keys: Res<ButtonInput<KeyCode>>,
-    shop_open: Res<ShopOpen>,
     consumed: Res<BKeyConsumed>,
     mut belts: ResMut<ConveyorBelts>,
     mut inventory: ResMut<Inventory>,
@@ -446,7 +451,7 @@ fn collect_conveyor_end(
     player_query: Query<&Transform, With<Player>>,
 ) {
     // Appui déjà utilisé par le mineur (placement / collecte) → rien ici
-    if !keys.just_pressed(KeyCode::KeyB) || shop_open.0 || consumed.0 {
+    if !keys.just_pressed(KeyCode::KeyB) || consumed.0 {
         return;
     }
 

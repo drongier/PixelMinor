@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use rand::Rng;
 use std::collections::HashMap;
 
-use crate::economy::resources::{Inventory, PlayerStats, ShopOpen};
+use crate::economy::resources::{GameState, Inventory, PlayerStats};
 use crate::player::player::Player;
 use crate::world::deposits::{Deposit, DepositType};
 use crate::world::tiles::{GridPos, TileType, TILE_SIZE};
@@ -13,7 +13,7 @@ impl Plugin for AutoMinerPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(MinerInventory::default())
             .init_resource::<BKeyConsumed>()
-            .add_systems(Update, (handle_b_key, auto_miner_production));
+            .add_systems(Update, (handle_b_key.run_if(in_state(GameState::Playing)), auto_miner_production));
     }
 }
 
@@ -73,7 +73,6 @@ pub fn transfer_storage(
 pub fn handle_b_key(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
-    shop_open: Res<ShopOpen>,
     mut consumed: ResMut<BKeyConsumed>,
     mut miner_inv: ResMut<MinerInventory>,
     mut inventory: ResMut<Inventory>,
@@ -83,7 +82,7 @@ pub fn handle_b_key(
     mut miner_query: Query<(&GridPos, &Transform, &mut AutoMiner)>,
 ) {
     consumed.0 = false;
-    if !keys.just_pressed(KeyCode::KeyB) || shop_open.0 {
+    if !keys.just_pressed(KeyCode::KeyB) {
         return;
     }
 

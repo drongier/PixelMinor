@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 use crate::machines::auto_miner::{AutoMiner, MinerInventory, MAX_MINER_STORAGE};
-use crate::machines::conveyor::{ConveyorState, CONVEYOR_COST};
+use crate::machines::conveyor::{path_cost, ConveyorState};
 use crate::world::deposits::Deposit;
 use crate::player::player::Player;
 use crate::economy::resources::{Inventory, PlayerStats, Wallet};
@@ -194,7 +194,8 @@ fn update_stats_panel(
 
     if conveyor_state.tracing {
         let tile_count = conveyor_state.current_path.len();
-        let cost = tile_count as u64 * CONVEYOR_COST;
+        // Pendant le tracé il n'y a pas de fusion (elle termine le tracé)
+        let cost = path_cost(tile_count, false);
         info.push_str(&format!(
             "\n\n>> MODE TAPIS <<\nTiles: {} (cout: {} c)\n[T] Terminer",
             tile_count, cost

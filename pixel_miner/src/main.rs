@@ -6,7 +6,7 @@ mod world;
 
 use bevy::prelude::*;
 
-use economy::resources::{Inventory, PlayerStats, ShopOpen, Wallet};
+use economy::resources::{GameState, Inventory, PlayerStats, Wallet};
 use economy::sell::SellPlugin;
 use economy::shop::ShopPlugin;
 use machines::auto_miner::AutoMinerPlugin;
@@ -32,10 +32,10 @@ fn main() {
                 })
                 .set(ImagePlugin::default_nearest()),
         )
+        .init_state::<GameState>()
         .insert_resource(ClearColor(Color::BLACK))
         .insert_resource(Inventory::default())
         .insert_resource(Wallet::default())
-        .insert_resource(ShopOpen::default())
         .insert_resource(PlayerStats::default())
         .insert_resource(WorldSeed::from_env_or_random())
         .add_plugins((MapPlugin, DepositPlugin, AutoMinerPlugin, ScoutBotPlugin, ConveyorPlugin, PlayerPlugin, SellPlugin, ShopPlugin, HudPlugin))

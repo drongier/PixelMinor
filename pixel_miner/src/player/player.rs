@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use crate::economy::resources::{Inventory, PlayerStats, ShopOpen};
+use crate::economy::resources::{GameState, Inventory, PlayerStats};
 use crate::world::tiles::{GridPos, Tile, TileMap, TileMinedEvent, GRID_SIZE, TILE_SIZE};
 
 const PLAYER_HALF: f32 = 2.0;
@@ -11,8 +11,12 @@ pub struct PlayerPlugin;
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_player)
-            .add_systems(Update, player_movement)
-            .add_systems(PostUpdate, camera_follow);
+            .add_systems(Update, player_movement.run_if(in_state(GameState::Playing)))
+            .add_systems(
+                PostUpdate,
+                // Avant la propagation : sinon la caméra affiche la position de la frame précédente
+                camera_follow.before(TransformSystem::TransformPropagate),
+            );
     }
 }
 
@@ -63,7 +67,6 @@ fn player_movement(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
-    shop_open: Res<ShopOpen>,
     stats: Res<PlayerStats>,
     mut player_query: Query<&mut Transform, With<Player>>,
     mut tile_query: TileQuery,
@@ -71,9 +74,6 @@ fn player_movement(
     mut inventory: ResMut<Inventory>,
     mut mine_events: EventWriter<TileMinedEvent>,
 ) {
-    if shop_open.0 {
-        return;
-    }
     let mut transform = player_query.single_mut();
     let mut direction = Vec2::ZERO;
 
@@ -147,7 +147,7 @@ fn mine_tile(
     inventory: &mut Inventory,
     mine_events: &mut EventWriter<TileMinedEvent>,
 ) {
-    if inventory.total_count() >= stats.inventory_capacity {
+    if inventory.is_full(stats) {
         return;
     }
     if let Ok((_, _, mut tile, grid_pos)) = tile_query.get_mut(entity) {

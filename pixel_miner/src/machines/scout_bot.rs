@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use std::collections::HashSet;
 
-use crate::economy::resources::{PlayerStats, ShopOpen};
+use crate::economy::resources::{GameState, PlayerStats};
 use crate::player::player::Player;
 use crate::world::deposits::{Deposit, DepositMap, DepositType};
 use crate::world::tiles::{GridPos, Tile, TileMap, TileMinedEvent, TILE_SIZE};
@@ -11,7 +11,7 @@ pub struct ScoutBotPlugin;
 impl Plugin for ScoutBotPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(BotInventory::default())
-            .add_systems(Update, (deploy_bot, bot_movement));
+            .add_systems(Update, (deploy_bot.run_if(in_state(GameState::Playing)), bot_movement));
     }
 }
 
@@ -90,7 +90,6 @@ fn hidden_cluster(
 fn deploy_bot(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
-    shop_open: Res<ShopOpen>,
     stats: Res<PlayerStats>,
     mut bot_inv: ResMut<BotInventory>,
     player_query: Query<&Transform, With<Player>>,
@@ -98,7 +97,7 @@ fn deploy_bot(
     deposit_query: Query<(&GridPos, &Deposit)>,
     bots: Query<&ScoutBot>,
 ) {
-    if !keys.just_pressed(KeyCode::KeyG) || shop_open.0 || bot_inv.count == 0 {
+    if !keys.just_pressed(KeyCode::KeyG) || bot_inv.count == 0 {
         return;
     }
 

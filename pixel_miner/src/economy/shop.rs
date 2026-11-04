@@ -3,7 +3,7 @@ use bevy::prelude::*;
 use crate::machines::auto_miner::MinerInventory;
 use crate::player::player::Player;
 use crate::economy::resources::{
-    bag_capacity, pickaxe_power, walk_speed, PlayerStats, ShopOpen, UpgradeTier, Wallet,
+    bag_capacity, pickaxe_power, walk_speed, GameState, PlayerStats, UpgradeTier, Wallet,
     BAG_TIERS, BASE_WALK_SPEED, PICKAXE_TIERS, SPEED_TIERS,
 };
 use crate::machines::scout_bot::BotInventory;
@@ -17,7 +17,15 @@ impl Plugin for ShopPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(ShopState::default())
             .add_systems(Startup, spawn_shop_zone)
-            .add_systems(Update, (shop_toggle, shop_buy));
+            .add_systems(OnEnter(GameState::InShop), spawn_shop_modal)
+            .add_systems(OnExit(GameState::InShop), despawn_shop_modal)
+            .add_systems(
+                Update,
+                (
+                    open_shop.run_if(in_state(GameState::Playing)),
+                    (close_shop, shop_buy).run_if(in_state(GameState::InShop)),
+                ),
+            );
     }
 }
 
@@ -62,49 +70,38 @@ fn spawn_shop_zone(mut commands: Commands) {
     ));
 }
 
-fn shop_toggle(
-    mut commands: Commands,
+fn toggle_pressed(keys: &ButtonInput<KeyCode>) -> bool {
+    keys.just_pressed(KeyCode::KeyE) || keys.just_pressed(KeyCode::Enter)
+}
+
+/// E / Entrée dans la zone du shop → InShop (le modal est créé par OnEnter).
+fn open_shop(
     keys: Res<ButtonInput<KeyCode>>,
     player_query: Query<&Transform, With<Player>>,
     shop_query: Query<&Transform, With<ShopZone>>,
-    modal_query: Query<Entity, With<ShopModal>>,
-    mut shop_open: ResMut<ShopOpen>,
+    mut next_state: ResMut<NextState<GameState>>,
 ) {
-    let toggle = keys.just_pressed(KeyCode::KeyE) || keys.just_pressed(KeyCode::Enter);
-
-    if !toggle && !keys.just_pressed(KeyCode::Escape) {
+    if !toggle_pressed(&keys) {
         return;
     }
-
-    if keys.just_pressed(KeyCode::Escape) && shop_open.0 {
-        close_shop(&mut commands, &modal_query, &mut shop_open);
-        return;
-    }
-
-    if toggle {
-        if shop_open.0 {
-            close_shop(&mut commands, &modal_query, &mut shop_open);
-        } else {
-            let player_pos = player_query.single().translation.truncate();
-            let shop_pos = shop_query.single().translation.truncate();
-            let half = SHOP_ZONE_SIZE / 2.0;
-            let in_zone = (player_pos.x - shop_pos.x).abs() <= half
-                && (player_pos.y - shop_pos.y).abs() <= half;
-
-            if in_zone {
-                shop_open.0 = true;
-                spawn_shop_modal(&mut commands);
-            }
-        }
+    let player_pos = player_query.single().translation.truncate();
+    let shop_pos = shop_query.single().translation.truncate();
+    let half = SHOP_ZONE_SIZE / 2.0;
+    let in_zone = (player_pos.x - shop_pos.x).abs() <= half
+        && (player_pos.y - shop_pos.y).abs() <= half;
+    if in_zone {
+        next_state.set(GameState::InShop);
     }
 }
 
-fn close_shop(
-    commands: &mut Commands,
-    modal_query: &Query<Entity, With<ShopModal>>,
-    shop_open: &mut ResMut<ShopOpen>,
-) {
-    shop_open.0 = false;
+/// E / Entrée / Échap → Playing (le modal est détruit par OnExit).
+fn close_shop(keys: Res<ButtonInput<KeyCode>>, mut next_state: ResMut<NextState<GameState>>) {
+    if toggle_pressed(&keys) || keys.just_pressed(KeyCode::Escape) {
+        next_state.set(GameState::Playing);
+    }
+}
+
+fn despawn_shop_modal(mut commands: Commands, modal_query: Query<Entity, With<ShopModal>>) {
     for entity in modal_query.iter() {
         commands.entity(entity).despawn_recursive();
     }
@@ -124,7 +121,6 @@ fn try_upgrade(tiers: &[UpgradeTier], current: usize, wallet: &mut Wallet) -> Op
 #[allow(clippy::too_many_arguments)] // système Bevy : une ressource par paramètre
 fn shop_buy(
     keys: Res<ButtonInput<KeyCode>>,
-    shop_open: Res<ShopOpen>,
     mut wallet: ResMut<Wallet>,
     mut stats: ResMut<PlayerStats>,
     mut shop_state: ResMut<ShopState>,
@@ -132,10 +128,6 @@ fn shop_buy(
     mut bot_inv: ResMut<BotInventory>,
     mut text_query: Query<&mut Text, With<ShopContentText>>,
 ) {
-    if !shop_open.0 {
-        return;
-    }
-
     let mut bought = false;
 
     // [1] Pioche
@@ -256,7 +248,7 @@ fn build_shop_text(state: &ShopState, wallet: &Wallet, miner_inv: &MinerInventor
     lines
 }
 
-fn spawn_shop_modal(commands: &mut Commands) {
+fn spawn_shop_modal(mut commands: Commands) {
     commands
         .spawn((
             ShopModal,
@@ -328,5 +320,29 @@ mod tests {
         let mut rich = Wallet { money: u64::MAX };
         assert_eq!(try_upgrade(PICKAXE_TIERS, PICKAXE_TIERS.len() - 1, &mut rich), None);
         assert_eq!(rich.money, u64::MAX);
+    }
+
+    #[test]
+    fn escape_in_shop_returns_to_playing_and_despawns_modal() {
+        use bevy::state::app::StatesPlugin;
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, StatesPlugin))
+            .init_state::<GameState>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .add_systems(OnEnter(GameState::InShop), spawn_shop_modal)
+            .add_systems(OnExit(GameState::InShop), despawn_shop_modal)
+            .add_systems(Update, close_shop.run_if(in_state(GameState::InShop)));
+
+        app.world_mut().resource_mut::<NextState<GameState>>().set(GameState::InShop);
+        app.update();
+        let modals = |app: &mut App| app.world_mut().query::<&ShopModal>().iter(app.world()).count();
+        assert_eq!(*app.world().resource::<State<GameState>>().get(), GameState::InShop);
+        assert_eq!(modals(&mut app), 1);
+
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::Escape);
+        app.update(); // close_shop demande Playing
+        app.update(); // transition appliquée, OnExit despawn
+        assert_eq!(*app.world().resource::<State<GameState>>().get(), GameState::Playing);
+        assert_eq!(modals(&mut app), 0);
     }
 }
