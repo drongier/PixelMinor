@@ -4,7 +4,7 @@ use crate::machines::auto_miner::MinerInventory;
 use crate::player::player::Player;
 use crate::economy::resources::{PlayerStats, ShopOpen, Wallet};
 use crate::machines::scout_bot::BotInventory;
-use crate::world::tiles::TILE_SIZE;
+use crate::world::tiles::{SHOP_ZONE_POS, TILE_SIZE};
 
 const SHOP_ZONE_SIZE: f32 = TILE_SIZE * 2.0;
 
@@ -92,7 +92,7 @@ fn spawn_shop_zone(mut commands: Commands) {
             custom_size: Some(Vec2::splat(SHOP_ZONE_SIZE)),
             ..default()
         },
-        Transform::from_xyz(0.0, 40.0, -2.0),
+        Transform::from_xyz(SHOP_ZONE_POS.x, SHOP_ZONE_POS.y, -2.0),
     ));
 }
 

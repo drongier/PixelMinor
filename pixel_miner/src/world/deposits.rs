@@ -1,13 +1,17 @@
 use bevy::prelude::*;
 use rand::Rng;
+use std::collections::HashMap;
 
-use crate::world::tiles::{GridPos, TileMinedEvent, TileType, BASE_RADIUS, GRID_SIZE, TILE_SIZE};
+use crate::world::tiles::{
+    GridPos, TileMinedEvent, TileType, Zone, BASE_RADIUS, GRID_SIZE, TILE_SIZE,
+};
 
 pub struct DepositPlugin;
 
 impl Plugin for DepositPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_deposits)
+        app.init_resource::<DepositMap>()
+            .add_systems(Startup, spawn_deposits)
             .add_systems(Update, reveal_deposits_on_mine);
     }
 }
@@ -72,23 +76,29 @@ impl DepositType {
 /// Choisit un type de gisement selon la zone de profondeur
 fn pick_deposit_type(distance: i32, rng: &mut impl Rng) -> Option<DepositType> {
     let roll: f32 = rng.gen();
-    match distance {
-        3..=20 => Some(DepositType::Ferrous),
-        21..=45 => {
+    match Zone::from_distance(distance) {
+        Zone::Base => None,
+        Zone::Z1 => Some(DepositType::Ferrous),
+        Zone::Z2 => {
             if roll < 0.70 { Some(DepositType::Ferrous) }
             else { Some(DepositType::Precious) }
         }
-        46..=75 => {
+        Zone::Z3 => {
             if roll < 0.40 { Some(DepositType::Precious) }
             else { Some(DepositType::Gems) }
         }
-        76..=110 => {
+        Zone::Z4 => {
             if roll < 0.40 { Some(DepositType::Gems) }
             else { Some(DepositType::Mythic) }
         }
-        111.. => Some(DepositType::Mythic),
-        _ => None,
+        Zone::Z5 => Some(DepositType::Mythic),
     }
+}
+
+/// Index des gisements par position pour lookup O(1)
+#[derive(Resource, Default)]
+pub struct DepositMap {
+    pub deposits: HashMap<GridPos, Entity>,
 }
 
 #[derive(Component)]
@@ -100,7 +110,7 @@ pub struct Deposit {
 const DEPOSIT_COUNT: usize = 80;
 const HIDDEN_DEPOSIT_COLOR: Color = Color::srgb(0.15, 0.12, 0.10);
 
-fn spawn_deposits(mut commands: Commands) {
+fn spawn_deposits(mut commands: Commands, mut deposit_map: ResMut<DepositMap>) {
     let half = GRID_SIZE / 2;
     let mut rng = rand::thread_rng();
     let mut occupied: Vec<GridPos> = Vec::new();
@@ -149,7 +159,7 @@ fn spawn_deposits(mut commands: Commands) {
             occupied.push(*pos);
             let world = pos.to_world();
 
-            commands.spawn((
+            let entity = commands.spawn((
                 Deposit {
                     deposit_type: deposit_type.clone(),
                     revealed: false,
@@ -161,18 +171,23 @@ fn spawn_deposits(mut commands: Commands) {
                     ..default()
                 },
                 Transform::from_xyz(world.x, world.y, -2.0),
-            ));
+            )).id();
+            deposit_map.deposits.insert(*pos, entity);
         }
     }
 }
 
 fn reveal_deposits_on_mine(
     mut events: EventReader<TileMinedEvent>,
-    mut deposit_query: Query<(&GridPos, &mut Deposit, &mut Sprite)>,
+    deposit_map: Res<DepositMap>,
+    mut deposit_query: Query<(&mut Deposit, &mut Sprite)>,
 ) {
     for event in events.read() {
-        for (grid_pos, mut deposit, mut sprite) in deposit_query.iter_mut() {
-            if *grid_pos == event.pos && !deposit.revealed {
+        let Some(&entity) = deposit_map.deposits.get(&event.pos) else {
+            continue;
+        };
+        if let Ok((mut deposit, mut sprite)) = deposit_query.get_mut(entity) {
+            if !deposit.revealed {
                 deposit.revealed = true;
                 sprite.color = deposit.deposit_type.color();
             }

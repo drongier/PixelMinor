@@ -3,7 +3,7 @@ use bevy::prelude::*;
 use crate::world::deposits::Deposit;
 use crate::player::player::Player;
 use crate::economy::resources::{PlayerStats, ShopOpen};
-use crate::world::tiles::{GridPos, Tile, TileMinedEvent, TILE_SIZE};
+use crate::world::tiles::{GridPos, Tile, TileMap, TileMinedEvent, TILE_SIZE};
 
 pub struct ScoutBotPlugin;
 
@@ -41,10 +41,7 @@ fn deploy_bot(
     }
 
     let player_pos = player_query.single().translation.truncate();
-    let player_grid = GridPos {
-        x: (player_pos.x / TILE_SIZE).round() as i32,
-        y: (player_pos.y / TILE_SIZE).round() as i32,
-    };
+    let player_grid = GridPos::from_world(player_pos);
 
     // Trouver le gisement non-révélé le plus proche
     let mut best: Option<(GridPos, i32)> = None;
@@ -52,7 +49,7 @@ fn deploy_bot(
         if deposit.revealed {
             continue;
         }
-        let dist = (grid_pos.x - player_grid.x).abs() + (grid_pos.y - player_grid.y).abs();
+        let dist = grid_pos.manhattan(&player_grid);
         if best.is_none() || dist < best.as_ref().unwrap().1 {
             best = Some((*grid_pos, dist));
         }
@@ -84,7 +81,8 @@ fn bot_movement(
     mut commands: Commands,
     time: Res<Time>,
     mut bot_query: Query<(Entity, &mut ScoutBot, &mut GridPos, &mut Transform)>,
-    mut tile_query: Query<(Entity, &GridPos, &mut Tile), (Without<ScoutBot>, Without<Player>)>,
+    tile_map: Res<TileMap>,
+    mut tile_query: Query<&mut Tile, (Without<ScoutBot>, Without<Player>)>,
     mut deposit_query: Query<(&GridPos, &mut Deposit, &mut Sprite), (Without<ScoutBot>, Without<Tile>)>,
     mut mine_events: EventWriter<TileMinedEvent>,
 ) {
@@ -117,23 +115,18 @@ fn bot_movement(
             }
         };
 
-        // Chercher s'il y a une tile à miner à cette position
-        let mut blocking_entity = None;
-        for (entity, tile_pos, tile) in tile_query.iter() {
-            if *tile_pos == next_grid {
-                blocking_entity = Some((entity, tile.hp));
-                break;
-            }
-        }
+        // Chercher s'il y a une tile à miner à cette position (Err si déjà despawnée)
+        let blocking = tile_map
+            .tiles
+            .get(&next_grid)
+            .and_then(|&entity| tile_query.get_mut(entity).ok().map(|tile| (entity, tile)));
 
-        if let Some((entity, _)) = blocking_entity {
+        if let Some((entity, mut tile)) = blocking {
             // Miner la tile
-            if let Ok((_, _, mut tile)) = tile_query.get_mut(entity) {
-                tile.hp -= bot.mining_power * time.delta_secs();
-                if tile.hp <= 0.0 {
-                    mine_events.send(TileMinedEvent { pos: next_grid });
-                    commands.entity(entity).despawn();
-                }
+            tile.hp -= bot.mining_power * time.delta_secs();
+            if tile.hp <= 0.0 {
+                mine_events.send(TileMinedEvent { pos: next_grid });
+                commands.entity(entity).despawn();
             }
         } else {
             // Pas de tile bloquante, avancer

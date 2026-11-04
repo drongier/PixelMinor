@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 use crate::economy::resources::{Inventory, PlayerStats, ShopOpen};
-use crate::world::tiles::{GridPos, Tile, TileMinedEvent, TILE_SIZE};
+use crate::world::tiles::{GridPos, Tile, TileMap, TileMinedEvent, TILE_SIZE};
 
 const PLAYER_HALF: f32 = 2.0;
 const TILE_HALF: f32 = TILE_SIZE / 2.0;
@@ -51,6 +51,7 @@ fn player_movement(
     stats: Res<PlayerStats>,
     mut player_query: Query<&mut Transform, With<Player>>,
     mut tile_query: Query<(Entity, &Transform, &mut Tile, &GridPos), Without<Player>>,
+    tile_map: Res<TileMap>,
     mut inventory: ResMut<Inventory>,
     mut mine_events: EventWriter<TileMinedEvent>,
 ) {
@@ -81,18 +82,21 @@ fn player_movement(
     let current = transform.translation.truncate();
     let delta = direction * stats.walk_speed * time.delta_secs();
 
-    // Collecte les tiles proches (entity + position)
-    let nearby: Vec<(Entity, Vec2)> = tile_query
-        .iter()
-        .filter_map(|(e, t, _, _)| {
-            let tp = t.translation.truncate();
-            if current.distance(tp) < TILE_SIZE * 3.0 {
-                Some((e, tp))
-            } else {
-                None
+    // Collecte les tiles proches (entity + position) via le TileMap, sur un carré 5x5
+    let center = GridPos::from_world(current);
+    let mut nearby: Vec<(Entity, Vec2)> = Vec::with_capacity(25);
+    for dx in -2..=2 {
+        for dy in -2..=2 {
+            let pos = GridPos { x: center.x + dx, y: center.y + dy };
+            let Some(&entity) = tile_map.tiles.get(&pos) else {
+                continue;
+            };
+            // Err si la tile a déjà été despawnée
+            if let Ok((_, t, _, _)) = tile_query.get(entity) {
+                nearby.push((entity, t.translation.truncate()));
             }
-        })
-        .collect();
+        }
+    }
 
     // Test X : bouge ou mine
     let new_x = Vec2::new(current.x + delta.x, current.y);

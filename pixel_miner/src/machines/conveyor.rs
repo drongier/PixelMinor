@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use crate::machines::auto_miner::AutoMiner;
 use crate::player::player::Player;
 use crate::economy::resources::{Inventory, PlayerStats, ShopOpen, Wallet};
-use crate::world::tiles::{GridPos, TileType, TILE_SIZE};
+use crate::world::tiles::{total_value, GridPos, TileType, SELL_ZONE_POS, TILE_SIZE};
 
 pub struct ConveyorPlugin;
 
@@ -68,9 +68,10 @@ struct ConveyorTile {
 }
 
 fn is_near_sell_zone(pos: &GridPos) -> bool {
-    let sell_grid = GridPos { x: 0, y: -2 };
-    let dist = (pos.x - sell_grid.x).abs() + (pos.y - sell_grid.y).abs();
-    dist <= SELL_ZONE_PROXIMITY
+    // La zone de vente est centrée à mi-chemin entre deux cases (y = -2.5 tiles) :
+    // on prend la case côté base (y = -2) pour conserver le comportement historique.
+    let sell_grid = GridPos::from_world(SELL_ZONE_POS + Vec2::new(0.0, TILE_SIZE / 2.0));
+    pos.manhattan(&sell_grid) <= SELL_ZONE_PROXIMITY
 }
 
 /// Vérifie si N'IMPORTE QUEL tile du path est adjacent à un mineur
@@ -173,10 +174,7 @@ fn toggle_tracing(
     } else {
         // Début du traçage
         let player_pos = player_query.single().translation.truncate();
-        let grid = GridPos {
-            x: (player_pos.x / TILE_SIZE).round() as i32,
-            y: (player_pos.y / TILE_SIZE).round() as i32,
-        };
+        let grid = GridPos::from_world(player_pos);
 
         state.tracing = true;
         state.current_path.clear();
@@ -210,10 +208,7 @@ fn trace_path(
     }
 
     let player_pos = player_query.single().translation.truncate();
-    let grid = GridPos {
-        x: (player_pos.x / TILE_SIZE).round() as i32,
-        y: (player_pos.y / TILE_SIZE).round() as i32,
-    };
+    let grid = GridPos::from_world(player_pos);
 
     if let Some(last) = state.last_grid {
         if grid == last {
@@ -470,12 +465,7 @@ fn conveyor_deliver(
             continue;
         }
 
-        let total: u64 = belt.end_storage
-            .iter()
-            .map(|(t, qty)| t.value() * (*qty as u64))
-            .sum();
-
-        wallet.money += total;
+        wallet.money += total_value(&belt.end_storage);
         belt.end_storage.clear();
     }
 }
@@ -493,10 +483,7 @@ fn collect_conveyor_end(
     }
 
     let player_pos = player_query.single().translation.truncate();
-    let player_grid = GridPos {
-        x: (player_pos.x / TILE_SIZE).round() as i32,
-        y: (player_pos.y / TILE_SIZE).round() as i32,
-    };
+    let player_grid = GridPos::from_world(player_pos);
 
     for belt in belts.belts.iter_mut() {
         if belt.sells_at_end || belt.end_storage.is_empty() {

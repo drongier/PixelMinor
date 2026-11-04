@@ -6,7 +6,7 @@ use crate::world::deposits::Deposit;
 use crate::player::player::Player;
 use crate::economy::resources::{Inventory, PlayerStats, Wallet};
 use crate::machines::scout_bot::BotInventory;
-use crate::world::tiles::{GridPos, TileType};
+use crate::world::tiles::{GridPos, TileType, Zone};
 
 pub struct HudPlugin;
 
@@ -141,19 +141,10 @@ fn update_stats_panel(
     mut text_query: Query<&mut Text, (With<HudStatsText>, Without<HudMoneyText>, Without<HudInventoryText>)>,
 ) {
     let pos = player_query.single().translation.truncate();
-    let grid_x = (pos.x / 16.0).round() as i32;
-    let grid_y = (pos.y / 16.0).round() as i32;
-    let dist = grid_x.abs() + grid_y.abs();
-    let player_grid = GridPos { x: grid_x, y: grid_y };
-
-    let zone = match dist {
-        0..=2 => "Base",
-        3..=20 => "Zone 1",
-        21..=45 => "Zone 2",
-        46..=75 => "Zone 3",
-        76..=110 => "Zone 4",
-        _ => "Zone 5",
-    };
+    let player_grid = GridPos::from_world(pos);
+    let (grid_x, grid_y) = (player_grid.x, player_grid.y);
+    let dist = player_grid.distance_from_center();
+    let zone = Zone::from_distance(dist).label();
 
     let mut info = format!(
         "-- Stats --\n\

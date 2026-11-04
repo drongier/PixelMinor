@@ -1,8 +1,14 @@
 use bevy::prelude::*;
+use std::collections::HashMap;
 
 pub const TILE_SIZE: f32 = 16.0;
 pub const GRID_SIZE: i32 = 150;
 pub const BASE_RADIUS: i32 = 2;
+
+/// Position monde du centre de la zone de vente
+pub const SELL_ZONE_POS: Vec2 = Vec2::new(0.0, -40.0);
+/// Position monde du centre de la zone du shop
+pub const SHOP_ZONE_POS: Vec2 = Vec2::new(0.0, 40.0);
 
 pub const HIDDEN_COLOR: Color = Color::srgb(0.15, 0.12, 0.10);
 
@@ -112,15 +118,28 @@ pub struct GridPos {
 }
 
 impl GridPos {
-    pub fn distance_from_center(&self) -> i32 {
+    /// Convertit une position monde en case de grille (arrondi au plus proche)
+    pub fn from_world(pos: Vec2) -> GridPos {
+        GridPos {
+            x: (pos.x / TILE_SIZE).round() as i32,
+            y: (pos.y / TILE_SIZE).round() as i32,
+        }
+    }
+
+    pub fn distance_from_center(self) -> i32 {
         self.x.abs() + self.y.abs()
     }
 
-    pub fn to_world(&self) -> Vec2 {
+    /// Distance de Manhattan entre deux cases
+    pub fn manhattan(&self, other: &GridPos) -> i32 {
+        (self.x - other.x).abs() + (self.y - other.y).abs()
+    }
+
+    pub fn to_world(self) -> Vec2 {
         Vec2::new(self.x as f32 * TILE_SIZE, self.y as f32 * TILE_SIZE)
     }
 
-    pub fn neighbors(&self) -> [GridPos; 4] {
+    pub fn neighbors(self) -> [GridPos; 4] {
         [
             GridPos { x: self.x,     y: self.y + 1 },
             GridPos { x: self.x,     y: self.y - 1 },
@@ -128,6 +147,52 @@ impl GridPos {
             GridPos { x: self.x + 1, y: self.y     },
         ]
     }
+}
+
+/// Zones de profondeur (distance de Manhattan depuis le centre)
+#[derive(Clone, Copy, Eq, PartialEq, Hash, Debug)]
+pub enum Zone {
+    Base,
+    Z1,
+    Z2,
+    Z3,
+    Z4,
+    Z5,
+}
+
+impl Zone {
+    pub fn from_distance(d: i32) -> Zone {
+        match d {
+            ..=2 => Zone::Base,
+            3..=20 => Zone::Z1,
+            21..=45 => Zone::Z2,
+            46..=75 => Zone::Z3,
+            76..=110 => Zone::Z4,
+            _ => Zone::Z5,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Zone::Base => "Base",
+            Zone::Z1 => "Zone 1",
+            Zone::Z2 => "Zone 2",
+            Zone::Z3 => "Zone 3",
+            Zone::Z4 => "Zone 4",
+            Zone::Z5 => "Zone 5",
+        }
+    }
+}
+
+/// Index des tiles par position pour lookup O(1)
+#[derive(Resource, Default)]
+pub struct TileMap {
+    pub tiles: HashMap<GridPos, Entity>,
+}
+
+/// Valeur totale d'un ensemble de ressources (somme valeur * quantité)
+pub fn total_value(items: &HashMap<TileType, u32>) -> u64 {
+    items.iter().map(|(t, qty)| t.value() * (*qty as u64)).sum()
 }
 
 /// Event envoyé quand une tile est minée
